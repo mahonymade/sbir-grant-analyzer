@@ -6,4 +6,4 @@ numpy>=1.26
 sentence-transformers>=2.7
 torch
 # Optional — only needed for LLM admin mode:
-anthropic>=0.30
+groq

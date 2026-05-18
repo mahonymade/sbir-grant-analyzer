@@ -19,5 +19,8 @@ __pycache__/
 # macOS
 .DS_Store
 
+# Claude Code internals
+.claude/
+
 # sentence-transformers cache
 .cache/

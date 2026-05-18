@@ -51,31 +51,33 @@ def find_conversions(
     phase2["_company_norm"] = phase2["company"].fillna("").apply(_normalize_company)
     phase2["_title_lc"] = phase2["award_title"].fillna("").str.lower()
 
-    # Build a lookup: normalized company → list of Phase II (title, row) pairs
-    p2_by_company: dict[str, list[str]] = {}
-    p2_rows_by_company: dict[str, list[pd.Series]] = {}
-    for _, row in phase2.iterrows():
-        co = row["_company_norm"]
-        p2_by_company.setdefault(co, []).append(row["_title_lc"])
-        p2_rows_by_company.setdefault(co, []).append(row)
+    # Build lookup dicts via groupby (much faster than iterrows)
+    p2_by_company: dict[str, list[str]] = (
+        phase2.groupby("_company_norm")["_title_lc"].apply(list).to_dict()
+    )
+    p2_rows_by_company: dict[str, list[dict]] = (
+        phase2.groupby("_company_norm", group_keys=False)
+        .apply(lambda g: g.to_dict("records"))
+        .to_dict()
+    )
 
     matched_p1_indices = []
     matched_p2_rows = []
 
-    for idx, p1_row in phase1.iterrows():
-        co = p1_row["_company_norm"]
+    # Iterate using .values arrays — avoids per-row pandas overhead of iterrows()
+    p1_companies = phase1["_company_norm"].values
+    p1_titles = phase1["_title_lc"].values
+    p1_indices = phase1.index.to_numpy()
+
+    for co, title, idx in zip(p1_companies, p1_titles, p1_indices):
         if co not in p2_by_company:
             continue
-        best_score = 0
-        best_p2 = None
-        for p2_title, p2_row in zip(p2_by_company[co], p2_rows_by_company[co]):
-            score = fuzz.token_sort_ratio(p1_row["_title_lc"], p2_title)
-            if score > best_score:
-                best_score = score
-                best_p2 = p2_row
-        if best_score >= fuzzy_threshold and best_p2 is not None:
+        p2_titles = p2_by_company[co]
+        scores = [fuzz.token_sort_ratio(title, pt) for pt in p2_titles]
+        best = max(range(len(scores)), key=scores.__getitem__)
+        if scores[best] >= fuzzy_threshold:
             matched_p1_indices.append(idx)
-            matched_p2_rows.append(best_p2)
+            matched_p2_rows.append(p2_rows_by_company[co][best])
 
     # Build matched pairs table
     p1_matched = phase1.loc[matched_p1_indices].reset_index(drop=True)

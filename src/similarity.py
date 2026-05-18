@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 import numpy as np
 import pandas as pd
@@ -97,9 +98,10 @@ def filter_by_embeddings(
 # LLM mode (admin-only)
 # ---------------------------------------------------------------------------
 
-BATCH_SIZE = 20  # abstracts per API call
-COST_PER_1K_INPUT_TOKENS = 0.003   # claude-sonnet-4-6 approximate
-COST_PER_1K_OUTPUT_TOKENS = 0.015
+GROQ_MODEL = "llama-3.1-8b-instant"  # replacement for decommissioned llama3-8b-8192
+BATCH_SIZE = 50  # abstracts per API call
+COST_PER_1K_INPUT_TOKENS = 0.00005  # llama-3.1-8b-instant on Groq: $0.05/1M input tokens
+COST_PER_1K_OUTPUT_TOKENS = 0.00008  # llama-3.1-8b-instant on Groq: $0.08/1M output tokens
 AVG_ABSTRACT_TOKENS = 250
 
 
@@ -128,6 +130,7 @@ Rate each grant below on a scale of 0–10 for relevance to the project descript
 - 10 = highly relevant (directly addresses the same problem/technology)
 
 Return ONLY a JSON array of objects with keys "index" (1-based) and "score" (integer 0-10).
+Do not wrap the JSON in markdown or code fences.
 Example: [{{"index": 1, "score": 7}}, {{"index": 2, "score": 2}}]
 
 GRANTS TO SCORE:
@@ -140,15 +143,15 @@ def filter_by_llm(
     api_key: str,
     min_score: int = 5,
 ) -> pd.DataFrame:
-    """Score grants using Claude and return those above min_score."""
-    import anthropic
+    """Score grants using Groq and return those above min_score."""
+    from groq import Groq
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = Groq(api_key=api_key)
 
     rows = df[["award_title", "abstract"]].fillna("").to_dict("records")
     all_scores: dict[int, int] = {}
 
-    progress = st.progress(0, text="Scoring with Claude…")
+    progress = st.progress(0, text="Scoring with Groq…")
     n_batches = max(1, (len(rows) + BATCH_SIZE - 1) // BATCH_SIZE)
 
     for batch_idx in range(0, len(rows), BATCH_SIZE):
@@ -159,22 +162,37 @@ def filter_by_llm(
         ]
         prompt = _build_scoring_prompt(project_description, batch_data)
 
-        message = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=512,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        try:
+            response = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=512,
+                response_format={"type": "json_object"},
+            )
+        except Exception as api_err:
+            st.error(f"Groq API error: {api_err}")
+            break
 
         try:
-            scores = json.loads(message.content[0].text)
+            raw = response.choices[0].message.content.strip()
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+            scores = json.loads(raw)
+            # Groq JSON mode may return {"results": [...]} or a bare array
+            if isinstance(scores, dict):
+                scores = next(iter(scores.values()))
             for entry in scores:
                 global_idx = batch_idx + entry["index"] - 1
                 all_scores[global_idx] = int(entry["score"])
-        except (json.JSONDecodeError, KeyError, IndexError):
+        except (json.JSONDecodeError, KeyError, IndexError, StopIteration):
             pass
 
         pct = min(1.0, (batch_idx + BATCH_SIZE) / len(rows))
         progress.progress(pct, text=f"Scoring batch {batch_idx // BATCH_SIZE + 1}/{n_batches}…")
+
+        # Pace requests to stay under Groq free tier (30 RPM)
+        if batch_idx + BATCH_SIZE < len(rows):
+            time.sleep(2)
 
     progress.empty()
 

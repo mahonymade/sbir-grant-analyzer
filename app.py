@@ -52,6 +52,10 @@ data_source = st.sidebar.radio(
 if data_source == "CSV file":
     default_path = os.path.join(os.path.dirname(__file__), "award_data.csv")
     csv_path = st.sidebar.text_input("CSV file path", value=default_path)
+    st.sidebar.caption(
+        "Don't have the data file? Download it from "
+        "[SBIR.gov Data Resources](https://www.sbir.gov/data-resources)."
+    )
     try:
         df_full = load_data(source="csv", path=csv_path)
         st.sidebar.success(f"Loaded {len(df_full):,} grants")
@@ -100,7 +104,7 @@ selected_phases = st.sidebar.multiselect(
 year_min = int(df_full["award_year"].min())
 year_max = int(df_full["award_year"].max())
 year_range = st.sidebar.slider(
-    "Award year range",
+    "Award year range (pre-filter for all tabs)",
     min_value=year_min,
     max_value=year_max,
     value=(year_min, year_max),
@@ -121,11 +125,348 @@ df_filtered = df_filtered[
 st.sidebar.markdown(f"**{len(df_filtered):,}** grants after filters")
 
 # ---------------------------------------------------------------------------
+# Guide tab content
+# ---------------------------------------------------------------------------
+
+_GUIDE_HTML = """
+<article class="sbir-writeup">
+  <header>
+    <h1>From SBIR Phase 1 to Phase 2: How the Transition Works</h1>
+    <p class="lede">
+      The SBIR (Small Business Innovation Research) program is structured as a deliberate, staged
+      funding pipeline designed to de-risk early-stage R&amp;D for both the federal government and
+      the small business. Moving from Phase 1 to Phase 2 is the most important inflection point in
+      the program — and it is far from automatic.
+    </p>
+  </header>
+
+  <section>
+    <h2>The basic structure</h2>
+    <p>
+      Phase 1 is a small feasibility award intended to test whether a technical concept can work.
+      At most agencies, Phase 1 awards run roughly $150,000 to $295,000 over 6 to 12 months, with
+      NIH being a notable outlier that allows Phase 1 grants to extend up to two years.<sup><a href="#ref-1">1</a></sup>
+      Deliverables are deliberately modest: a technical feasibility report, an initial
+      commercialization plan, and a roadmap for Phase 2.<sup><a href="#ref-1">1</a></sup>
+    </p>
+    <p>
+      Phase 2 is a much larger commitment. Award sizes typically range from $750,000 to roughly
+      $2 million over approximately 24 months, funding the prototype development and engineering
+      work needed to turn a validated concept into a working technology.<sup><a href="#ref-2">2</a></sup>
+      In Technology Readiness Level terms, Phase 1 is generally expected to move a technology from
+      TRL 2–3 to TRL 4–5, while Phase 2 targets TRL 5–6.<sup><a href="#ref-3">3</a></sup>
+    </p>
+    <p>
+      Phase 3, by contrast, is not an SBIR-funded award at all — it is the commercialization stage,
+      pursued with non-SBIR funds (private capital, government procurement contracts, or licensing
+      revenue).<sup><a href="#ref-2">2</a></sup>
+    </p>
+  </section>
+
+  <section>
+    <h2>Eligibility and pathways into Phase 2</h2>
+    <p>
+      With limited exceptions, Phase 2 is restricted to companies that have already completed a
+      Phase 1 award at the same agency.<sup><a href="#ref-4">4</a></sup> A Phase 1 award does not
+      guarantee Phase 2 funding; it is essentially a license to compete in a separate, more
+      rigorous Phase 2 review against other Phase 1 graduates.
+    </p>
+    <p>
+      Several agencies — notably DoD, NIH, and DOE — offer a <em>Direct to Phase II</em> (D2P2)
+      pathway for companies that have already completed equivalent feasibility work using non-SBIR
+      funding such as private investment or corporate R&amp;D dollars. NSF does not currently offer
+      a Direct to Phase II pathway.<sup><a href="#ref-4">4</a></sup> The D2P2 bar is high:
+      reviewers evaluate the submitted feasibility data as though it were a Phase 1 final report,
+      and weak feasibility evidence is the leading reason D2P2 proposals fail.<sup><a href="#ref-4">4</a></sup>
+    </p>
+  </section>
+
+  <section>
+    <h2>Conversion rates from Phase 1 to Phase 2</h2>
+    <p>
+      Because the Phase 2 applicant pool is restricted to Phase 1 graduates, conversion rates are
+      meaningfully higher than initial Phase 1 win rates, which generally run 15–25% across major
+      agencies.<sup><a href="#ref-1">1</a></sup> Reported Phase 1-to-Phase 2 conversion rates vary
+      by source and agency, but typically fall in the range of 30–55%.<sup><a href="#ref-2">2</a></sup><sup>,</sup><sup><a href="#ref-4">4</a></sup>
+    </p>
+  </section>
+
+  <section>
+    <h2>Timeline and submission mechanics</h2>
+    <p>
+      The submission window and review cadence vary considerably by agency:
+    </p>
+    <ul>
+      <li>
+        <strong>NIH:</strong> Phase 2 applications must be submitted within two years of the
+        Phase 1 end date.<sup><a href="#ref-4">4</a></sup>
+      </li>
+      <li>
+        <strong>NSF:</strong> Phase 2 invitations are issued after evaluation of Phase 1 results,
+        typically 4 to 6 months after Phase 1 ends.<sup><a href="#ref-4">4</a></sup>
+      </li>
+      <li>
+        <strong>DoD components:</strong> Practices vary widely — some components accept Phase 2
+        proposals on a rolling basis while others run annual solicitations.<sup><a href="#ref-4">4</a></sup>
+      </li>
+      <li>
+        <strong>Across agencies:</strong> Expect 4 to 9 months from Phase 2 submission to award
+        notification.<sup><a href="#ref-4">4</a></sup>
+      </li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>What drives Phase 2 progression</h2>
+    <p>
+      Five factors do most of the work in determining which Phase 1 awardees successfully move on.
+    </p>
+
+    <h3>1. Phase 1 technical results</h3>
+    <p>
+      Reviewers expect Phase 1 outcomes to be described in enough detail to allow independent
+      judgment of whether the feasibility hypothesis was genuinely tested and the technical bar
+      was met.<sup><a href="#ref-5">5</a></sup> Vague, incomplete, or unconvincing Phase 1 results
+      are the most common technical reason for rejection at the Phase 2 stage.
+    </p>
+
+    <h3>2. The commercialization plan</h3>
+    <p>
+      This is where most applicants stumble. Phase 1 tolerates a thin commercialization section;
+      Phase 2 does not. At NIH the commercialization plan is weighted as heavily as the research
+      plan, and at NSF commercial potential is even more prominent — a dedicated, solicitation-specific
+      merit review criterion in addition to the standard Intellectual Merit and Broader Impacts
+      criteria.<sup><a href="#ref-6">6</a></sup> Phase 2 commercialization plans are expected to
+      cover the market opportunity, customer characteristics, competition, marketing and sales
+      strategy, intellectual property strategy, financing plan, and a credible timeline from
+      end-of-Phase-2 to market entry.<sup><a href="#ref-7">7</a></sup>
+    </p>
+
+    <h3>3. Team and company capability</h3>
+    <p>
+      Reviewers assess whether the company has the business network, expertise, and structural
+      readiness to actually commercialize the technology — not just do more research. Prior
+      commercialization success from earlier SBIR awards is a positive signal but is not strictly
+      required for first-time Phase 2 applicants.<sup><a href="#ref-8">8</a></sup>
+    </p>
+
+    <h3>4. Third-party validation and matching funds</h3>
+    <p>
+      Letters of support from prospective customers, evidence of investor interest, and — for DoD
+      especially — matching commitments from a government end-user materially strengthen
+      applications. DoD Phase 2 Enhancements can increase the SBIR award by up to $1 million for
+      every $1 of customer matching funds, up to defined caps.<sup><a href="#ref-2">2</a></sup>
+      NASA explicitly evaluates the offeror's record in technology commercialization, co-funding
+      commitments, and existing or projected Phase 3 funding sources.<sup><a href="#ref-9">9</a></sup>
+    </p>
+
+    <h3>5. Budget-to-workplan coherence</h3>
+    <p>
+      A budget that does not match the scope of work described — or vice versa — is a common
+      and avoidable killer. The technical narrative and the budget must tell a consistent story
+      about the scale and intensity of the development effort.<sup><a href="#ref-2">2</a></sup>
+    </p>
+  </section>
+
+  <section>
+    <h2>Agency-specific differences</h2>
+    <p>
+      Each participating agency emphasizes slightly different criteria:
+    </p>
+    <ul>
+      <li>
+        <strong>NSF and NIH</strong> treat commercialization potential as a co-equal or even
+        primary merit criterion alongside technical merit.<sup><a href="#ref-6">6</a></sup>
+      </li>
+      <li>
+        <strong>DoD</strong> weights potential government and military application heavily and
+        rewards demonstrated engagement with end-user program offices.<sup><a href="#ref-9">9</a></sup>
+      </li>
+      <li>
+        <strong>DOE</strong> evaluates "impact" — the likelihood that the work leads to a
+        marketable product and the likelihood of attracting follow-on funding after the SBIR
+        project ends.<sup><a href="#ref-9">9</a></sup> DOE also now requires a cybersecurity
+        self-assessment and five-year cash-flow pro-forma worksheets as part of the Phase 2
+        application.<sup><a href="#ref-10">10</a></sup>
+      </li>
+      <li>
+        <strong>NASA</strong> explicitly evaluates the offeror's commercialization track record
+        and any co-funding commitments from private or non-SBIR sources.<sup><a href="#ref-9">9</a></sup>
+      </li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Beyond a single Phase 2 award</h2>
+    <p>
+      Several agencies offer follow-on funding mechanisms for Phase 2 awardees who need
+      additional runway before commercial readiness:
+    </p>
+    <ul>
+      <li>
+        <strong>NIH Phase IIB</strong> (competing renewals) can provide an additional $2 million
+        for continued development.<sup><a href="#ref-2">2</a></sup>
+      </li>
+      <li>
+        <strong>DoD Phase 2 Enhancements</strong> add matching SBIR funds when a customer commits
+        non-SBIR dollars.<sup><a href="#ref-2">2</a></sup>
+      </li>
+      <li>
+        <strong>NSF and NIH supplements</strong> provide additional support for commercialization
+        activities, I-Corps participation, and other specific purposes.<sup><a href="#ref-2">2</a></sup>
+      </li>
+      <li>
+        <strong>DOE Phase IIA, IIB, and IIC</strong> structures provide layered follow-on funding,
+        some issued as cooperative agreements rather than grants.<sup><a href="#ref-10">10</a></sup>
+      </li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>The bottom line</h2>
+    <p>
+      Companies that successfully transition from Phase 1 to Phase 2 tend to treat Phase 1 not as
+      a standalone research project but as the first act of a multi-year commercialization story.
+      They use Phase 1 to gather customer letters, validate the market, identify regulatory
+      pathways, and build the relationships that will populate the Phase 2 commercialization
+      plan.<sup><a href="#ref-2">2</a></sup> Phase 2 reviewers are looking for evidence, not
+      promises — both technically and commercially.
+    </p>
+  </section>
+
+  <footer>
+    <h2 id="references">References</h2>
+    <ol class="references">
+      <li id="ref-1">
+        SLED.AI. "SBIR Phase 1 vs Phase 2: Funding, Timeline, and How to Move Up (2026)."
+        <a href="https://www.sledai.com/blog/sbir-phase-1-vs-phase-2/" target="_blank" rel="noopener">
+          sledai.com/blog/sbir-phase-1-vs-phase-2
+        </a>
+      </li>
+      <li id="ref-2">
+        Granted AI. "SBIR Phase I vs Phase II: Requirements, Timelines, and Strategy."
+        <a href="https://grantedai.com/blog/sbir-phase-1-vs-phase-2-requirements-strategy" target="_blank" rel="noopener">
+          grantedai.com/blog/sbir-phase-1-vs-phase-2-requirements-strategy
+        </a>
+      </li>
+      <li id="ref-3">
+        Granted AI. "SBIR Grant Guide for First-Time Applicants (2026)."
+        <a href="https://grantedai.com/blog/sbir-grant-guide-2026" target="_blank" rel="noopener">
+          grantedai.com/blog/sbir-grant-guide-2026
+        </a>
+      </li>
+      <li id="ref-4">
+        Grantsights. "SBIR Phase 2 Guide: Awards &amp; How to Apply (2026)."
+        <a href="https://grantsights.com/blog/sbir-phase-2-guide" target="_blank" rel="noopener">
+          grantsights.com/blog/sbir-phase-2-guide
+        </a>
+      </li>
+      <li id="ref-5">
+        USDA NIFA. "Instructions for Reviewing SBIR Phase II Applications — Technical Proposal."
+        <a href="https://www.nifa.usda.gov/sites/default/files/resources/SBIR_phase2_technical_proposal_review_instructions.pdf" target="_blank" rel="noopener">
+          nifa.usda.gov (PDF)
+        </a>
+      </li>
+      <li id="ref-6">
+        U.S. National Science Foundation. "NSF 24-580: SBIR/STTR Phase II Program Solicitation."
+        <a href="https://www.nsf.gov/funding/opportunities/sbirsttr-phase-ii-nsf-small-business-innovation-research-small-business/nsf24-580/solicitation" target="_blank" rel="noopener">
+          nsf.gov/funding/opportunities/nsf24-580
+        </a>
+      </li>
+      <li id="ref-7">
+        USDA NIFA. "Commercialization Plan Guidance for Phase II Applications."
+        <a href="https://www.nifa.usda.gov/commercialization-plan-guidance-phase-ii-applications" target="_blank" rel="noopener">
+          nifa.usda.gov/commercialization-plan-guidance-phase-ii-applications
+        </a>
+      </li>
+      <li id="ref-8">
+        USDA NIFA. "Instructions for Reviewing SBIR Phase II Applications — Commercialization Plan."
+        <a href="https://www.nifa.usda.gov/sites/default/files/resources/SBIR_phase2_commercialization_review_instructions.pdf" target="_blank" rel="noopener">
+          nifa.usda.gov (PDF)
+        </a>
+      </li>
+      <li id="ref-9">
+        SBIR.gov. "Understand the Proposal Evaluation Criteria."
+        <a href="https://www.sbir.gov/tutorials/preparing-proposal/tutorial-1" target="_blank" rel="noopener">
+          sbir.gov/tutorials/preparing-proposal/tutorial-1
+        </a>
+      </li>
+      <li id="ref-10">
+        U.S. Department of Energy Office of Science. "Preparing DOE SBIR/STTR Phase 2 Applications."
+        <a href="https://science.osti.gov/sbir/Applicant-Resources/Grant-Application-Phase-II" target="_blank" rel="noopener">
+          science.osti.gov/sbir/Applicant-Resources/Grant-Application-Phase-II
+        </a>
+      </li>
+    </ol>
+    <p class="meta">
+      <em>Last updated: May 2026. SBIR program details, award caps, and agency procedures change
+      frequently — verify against the current solicitation or agency program page before relying
+      on specific figures.</em>
+    </p>
+  </footer>
+</article>
+
+<style>
+  .sbir-writeup {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 1.5rem;
+    line-height: 1.65;
+    color: inherit;
+  }
+  .sbir-writeup h1 {
+    font-size: 1.875rem;
+    line-height: 1.25;
+    margin: 0 0 0.75rem;
+  }
+  .sbir-writeup h2 {
+    font-size: 1.375rem;
+    margin: 2rem 0 0.5rem;
+    line-height: 1.3;
+  }
+  .sbir-writeup h3 {
+    font-size: 1.05rem;
+    margin: 1.25rem 0 0.4rem;
+  }
+  .sbir-writeup .lede {
+    font-size: 1.05rem;
+    opacity: 0.85;
+  }
+  .sbir-writeup ul,
+  .sbir-writeup ol {
+    padding-left: 1.5rem;
+  }
+  .sbir-writeup li {
+    margin: 0.35rem 0;
+  }
+  .sbir-writeup sup a {
+    text-decoration: none;
+    font-weight: 600;
+    padding: 0 1px;
+  }
+  .sbir-writeup sup a:hover {
+    text-decoration: underline;
+  }
+  .sbir-writeup .references {
+    font-size: 0.92rem;
+  }
+  .sbir-writeup .references li {
+    margin: 0.6rem 0;
+  }
+  .sbir-writeup .meta {
+    font-size: 0.85rem;
+    opacity: 0.7;
+    margin-top: 1.5rem;
+  }
+</style>
+"""
+
+# ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
 
-tab_search, tab_conversion = st.tabs(
-    ["🔍 Project Similarity Search", "📊 Phase Conversion Analysis"]
+tab_search, tab_conversion, tab_guide = st.tabs(
+    ["🔍 Project Similarity Search", "📊 Phase Conversion Analysis", "📖 Phase 1 → 2 Guide"]
 )
 
 # ===========================================================================
@@ -209,7 +550,7 @@ with tab_search:
 
     # ---- LLM mode ----
     elif mode == "LLM Scoring (Admin)":
-        st.warning("LLM scoring uses the Claude API and incurs cost. Admin access required.")
+        st.warning("LLM scoring uses the Groq API and incurs cost. Admin access required.")
 
         admin_unlocked = False
         try:
@@ -231,37 +572,59 @@ with tab_search:
         if admin_unlocked:
             st.success("Admin access granted.")
             try:
-                api_key = st.secrets["ANTHROPIC_API_KEY"]
+                api_key = st.secrets["GROQ_API_KEY"]
             except Exception:
-                api_key = st.text_input("Anthropic API key", type="password")
+                api_key = st.text_input("Groq API key", type="password")
 
-            col1, col2 = st.columns(2)
-            with col1:
-                min_score = st.slider("Minimum relevance score (0–10)", 0, 10, 5)
-            with col2:
-                n_to_score = min(len(df_filtered), 500)
-                est_cost = estimate_llm_cost(n_to_score)
-                st.metric(
-                    "Estimated API cost",
-                    f"~${est_cost:.2f}",
-                    help=f"Scoring up to {n_to_score} grants (first 500 after filters).",
+            # Gate: require embeddings search results as input
+            emb_results = (
+                st.session_state.get("search_results")
+                if st.session_state.get("search_mode") == "embeddings"
+                else None
+            )
+
+            if emb_results is None:
+                st.info(
+                    "First run an **Embeddings** search above, then return here to "
+                    "re-score those results with Groq for higher precision. "
+                    "This keeps API usage within free tier limits."
                 )
-
-            if st.button("Run LLM scoring", type="primary", key="llm_search"):
-                if not api_key:
-                    st.error("API key required.")
-                elif not project_description.strip():
-                    st.warning("Enter a project description above.")
-                else:
-                    subset = df_filtered.head(n_to_score)
-                    results = filter_by_llm(
-                        subset,
-                        project_description,
-                        api_key=api_key,
-                        min_score=min_score,
+            else:
+                # Free tier cap: 6000 TPM — limit to 30 grants to stay safe
+                LLM_MAX_GRANTS = 30
+                llm_input = emb_results.head(LLM_MAX_GRANTS)
+                n_to_score = len(llm_input)
+                if len(emb_results) > LLM_MAX_GRANTS:
+                    st.caption(
+                        f"ℹ️ Groq free tier is capped at 6 000 tokens/min. "
+                        f"Scoring top {LLM_MAX_GRANTS} of {len(emb_results)} embeddings results."
                     )
-                    st.session_state["search_results"] = results
-                    st.session_state["search_mode"] = "llm"
+                est_cost = estimate_llm_cost(n_to_score)
+                col1, col2 = st.columns(2)
+                with col1:
+                    min_score = st.slider("Minimum relevance score (0–10)", 0, 10, 5)
+                with col2:
+                    st.metric(
+                        "Estimated API cost",
+                        f"~${est_cost:.3f}",
+                        help=f"Scoring {n_to_score} grants from your embeddings search.",
+                    )
+
+                if st.button("Run LLM scoring", type="primary", key="llm_search"):
+                    if not api_key:
+                        st.error("API key required.")
+                    elif not project_description.strip():
+                        st.warning("Enter a project description above.")
+                    else:
+                        with st.spinner("Scoring with Groq…"):
+                            results = filter_by_llm(
+                                llm_input,
+                                project_description,
+                                api_key=api_key,
+                                min_score=min_score,
+                            )
+                        st.session_state["search_results"] = results
+                        st.session_state["search_mode"] = "llm"
 
     # ---- Results display ----
     st.markdown("---")
@@ -333,40 +696,29 @@ with tab_conversion:
     st.markdown(
         "Estimate the rate at which companies that received Phase I awards "
         "went on to receive a Phase II award for the same project. "
-        "Phase II matching always searches the **full dataset** regardless of year filters."
+        "Use the **Award year range** slider in the sidebar to control which years are analysed."
     )
 
     # ---- Controls ----
-    ctrl_col1, ctrl_col2 = st.columns([2, 1])
+    fuzzy_threshold = st.slider(
+        "Title match threshold",
+        min_value=60,
+        max_value=100,
+        value=85,
+        step=5,
+        help="Higher = stricter title matching. 85 is a good default.",
+    )
 
-    with ctrl_col1:
-        p1_year_min = int(df_full["award_year"].min())
-        p1_year_max = int(df_full["award_year"].max())
-        p1_year_range = st.slider(
-            "Phase I award year range",
-            min_value=p1_year_min,
-            max_value=p1_year_max,
-            value=(p1_year_min, p1_year_max),
-            help="Filter which Phase I grants are included. Phase II matching always uses all years.",
-        )
+    # Phase II pool: bounded from sidebar start year — Phase II before that year can't match
+    phase2_pool = df_full[
+        (df_full["phase"].str.strip() == "Phase II") &
+        (df_full["award_year"] >= year_range[0])
+    ]
 
-    with ctrl_col2:
-        fuzzy_threshold = st.slider(
-            "Title match threshold",
-            min_value=60,
-            max_value=100,
-            value=85,
-            step=5,
-            help="Higher = stricter title matching. 85 is a good default.",
-        )
-
-    # Phase II pool is always the full dataset, all years
-    phase2_pool = df_full[df_full["phase"].str.strip() == "Phase II"]
-
-    # Overall Phase I pool: full dataset filtered to selected year range only
+    # Overall Phase I pool: full dataset filtered to sidebar year range
     phase1_overall = df_full[
         (df_full["phase"].str.strip() == "Phase I") &
-        (df_full["award_year"].between(p1_year_range[0], p1_year_range[1]))
+        (df_full["award_year"].between(year_range[0], year_range[1]))
     ]
 
     # Similarity-filtered Phase I pool (if a search has been run)
@@ -375,7 +727,7 @@ with tab_conversion:
         search_res = st.session_state["search_results"]
         phase1_similar = search_res[
             (search_res["phase"].str.strip() == "Phase I") &
-            (search_res["award_year"].between(p1_year_range[0], p1_year_range[1]))
+            (search_res["award_year"].between(year_range[0], year_range[1]))
         ]
         similar_label = f"Similar grants only ({len(phase1_similar):,} Phase I)"
         st.info(
@@ -492,3 +844,10 @@ with tab_conversion:
             mime="text/csv",
             key="conv_download",
         )
+
+# ===========================================================================
+# TAB 3 — Phase 1 → 2 Guide
+# ===========================================================================
+
+with tab_guide:
+    st.html(_GUIDE_HTML)
