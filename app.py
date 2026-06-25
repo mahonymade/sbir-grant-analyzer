@@ -24,6 +24,17 @@ from src.similarity import (
     estimate_llm_cost,
 )
 
+
+def _get_secret(name: str, default: str = "") -> str:
+    """Read a secret from st.secrets (local / Streamlit Cloud) or os.environ
+    (Hugging Face Spaces injects Space secrets as environment variables)."""
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass
+    return os.environ.get(name, default)
+
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
@@ -556,10 +567,7 @@ with tab_search:
         st.warning("LLM scoring uses the Groq API and incurs cost. Admin access required.")
 
         admin_unlocked = False
-        try:
-            stored_password = st.secrets.get("ADMIN_PASSWORD", "")
-        except Exception:
-            stored_password = ""
+        stored_password = _get_secret("ADMIN_PASSWORD")
 
         if stored_password:
             password_input = st.text_input("Admin password", type="password")
@@ -568,15 +576,14 @@ with tab_search:
                 st.error("Incorrect password.")
         else:
             st.info(
-                "No admin password configured. "
-                "Add `ADMIN_PASSWORD` to `.streamlit/secrets.toml` to enable this mode."
+                "No admin password configured. Set `ADMIN_PASSWORD` in the Space "
+                "settings (Variables and secrets) or in `.streamlit/secrets.toml` locally."
             )
 
         if admin_unlocked:
             st.success("Admin access granted.")
-            try:
-                api_key = st.secrets["GROQ_API_KEY"]
-            except Exception:
+            api_key = _get_secret("GROQ_API_KEY")
+            if not api_key:
                 api_key = st.text_input("Groq API key", type="password")
 
             # Gate: require embeddings search results as input
