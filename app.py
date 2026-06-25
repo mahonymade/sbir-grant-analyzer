@@ -569,6 +569,24 @@ with tab_search:
         admin_unlocked = False
         stored_password = _get_secret("ADMIN_PASSWORD")
 
+        # TEMP DIAGNOSTIC — remove once secrets are confirmed working.
+        with st.expander("🔧 Secret detection debug"):
+            try:
+                in_secrets = "ADMIN_PASSWORD" in st.secrets
+            except Exception as e:
+                in_secrets = f"st.secrets error: {type(e).__name__}"
+            st.write(
+                {
+                    "ADMIN_PASSWORD in os.environ": "ADMIN_PASSWORD" in os.environ,
+                    "ADMIN_PASSWORD in st.secrets": in_secrets,
+                    "GROQ_API_KEY in os.environ": "GROQ_API_KEY" in os.environ,
+                    "resolved password length": len(stored_password or ""),
+                    "env keys containing ADMIN/GROQ": sorted(
+                        k for k in os.environ if "ADMIN" in k.upper() or "GROQ" in k.upper()
+                    ),
+                }
+            )
+
         if stored_password:
             password_input = st.text_input("Admin password", type="password")
             admin_unlocked = password_input == stored_password
