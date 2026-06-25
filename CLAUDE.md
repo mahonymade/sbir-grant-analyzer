@@ -174,6 +174,9 @@ SBIRAnalysis/
 - **Run app**: `.venv/bin/streamlit run app.py`
 - **Build artifacts**: `.venv/bin/python scripts/build_artifacts.py` (add `--upload --repo <user>/<repo>` to push to HF Hub)
 - **GitHub**: https://github.com/mahonymade/sbir-grant-analyzer (mahonymade account)
-- **HF Hub dataset repo**: `mahonymade/sbir-grant-analyzer-data` (default; override via `SBIR_DATA_REPO`) — artifacts NOT yet uploaded (build done locally 2026-06-24; upload requires `huggingface-cli login` / `HF_TOKEN`)
+- **HF Hub dataset repo**: `mahonymade/sbir-grant-analyzer-data` (public; default, override via `SBIR_DATA_REPO`) — artifacts UPLOADED 2026-06-25 (grants.parquet 84.7 MB, embeddings.npy 154.5 MB, meta.json).
+- **HF Space (LIVE)**: https://huggingface.co/spaces/mahonymade/sbir-grant-analyzer (Streamlit SDK, free CPU basic). `git remote space` → the Space repo. Deployed via `git push space main`. README YAML frontmatter (sdk: streamlit, app_file: app.py) must be the FIRST line of README.md or HF warns "empty/missing yaml metadata".
+- **HF Spaces secrets are ENV VARS, not `st.secrets`** — Space "Variables and secrets" are injected as `os.environ`, NOT written to `.streamlit/secrets.toml`. `app.py:_get_secret()` reads `st.secrets` first (local) then `os.environ` (Space) for `ADMIN_PASSWORD` / `GROQ_API_KEY`. Set both in Space settings for LLM mode to work live.
+- **zsh gotcha**: interactive zsh does NOT treat `#` as a comment by default — don't paste commands with trailing `# comments` into the terminal (they become git refspecs and error).
 - **Packages**: streamlit 1.57, pandas, rapidfuzz, numpy, pyarrow, huggingface_hub, sentence-transformers 5.4.1, torch (CPU wheel on deploy), groq
 - **secrets.toml**: `ADMIN_PASSWORD = "SBIRAdmin"` and `GROQ_API_KEY` (needs rotation)
