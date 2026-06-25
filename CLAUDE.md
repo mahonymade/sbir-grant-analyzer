@@ -13,7 +13,14 @@ The codebase is pushed to GitHub at **https://github.com/mahonymade/sbir-grant-a
 ---
 
 ## Established Constraints & Rules
-- **Data file**: `award_data.csv` (351 MB, 207,731 rows, 41 columns) in project root. Gitignored. Source: https://www.sbir.gov/data-resources
+- **Web artifacts (primary load path)**: app loads slim precomputed artifacts, NOT the raw CSV at runtime.
+  - `data/grants.parquet` (~81 MB, zstd, 201,204 rows after dropping empty title+abstract, 8 slim cols + `_row_id`)
+  - `data/embeddings.npy` (~147 MB, float16, shape (201204, 384), `all-MiniLM-L6-v2`, **normalized at build** → cosine = dot product)
+  - `data/meta.json` (model/n_rows/dim/dtype/built — runtime validates `n_rows` vs embeddings shape)
+  - Built by `scripts/build_artifacts.py` (MPS/CUDA auto). Hosted on **HF Hub dataset repo** (default `mahonymade/sbir-grant-analyzer-data`, override via `SBIR_DATA_REPO` env/secret). Downloaded once onto SERVER via `hf_hub_download`; browser visitor downloads nothing. Both big artifacts gitignored.
+  - **Row alignment**: `_row_id` (0..N-1) in parquet maps to row i of embeddings. Runtime slices `embeddings[df["_row_id"]]`, robust to any filter/sort. Column starts with `_` so it's hidden from display/download (which strip `_`-prefixed cols).
+  - **Artifact resolution is local-first**: `_resolve_artifact()` uses `data/<file>` if present (post-build, no download), else `hf_hub_download`. Lets a local build be tested before upload.
+- **Raw CSV (dev/fallback)**: `award_data.csv` (351 MB, 207,731 rows, 41 columns) in project root. Gitignored. Source: https://www.sbir.gov/data-resources. Selected via sidebar "Local CSV". In CSV mode there's no precomputed embeddings → `filter_by_embeddings` falls back to encoding the filtered corpus on the fly (slow path).
 - **Column naming**: All normalized to `lowercase_with_underscores` at load time.
 - **Phase encoding**: `"Phase I"` / `"Phase II"` (string with space + Roman numeral). Always `.str.strip()` before comparing.
 - **Phase II pool**: Bounded from sidebar `year_range[0]` upward — Phase II awards before the earliest sidebar year are excluded (efficiency). Upper bound is NOT applied to Phase II (a Phase I from 2023 may convert in 2025+).
@@ -25,7 +32,7 @@ The codebase is pushed to GitHub at **https://github.com/mahonymade/sbir-grant-a
 - **`award_amount`** stored as comma-formatted strings in CSV — loader strips commas before `pd.to_numeric()`.
 - **Year axis labels** cast to `str` to prevent Streamlit adding comma thousand-separators (e.g. "2,026").
 - **Large counts** use compact K/M format via `_fmt()`.
-- **No git commits made** across the last two sessions — user prefers to commit manually.
+- **Git**: user commits and pushes manually. Latest push: commit `84a97ef` (2026-05-18).
 
 ---
 
@@ -40,26 +47,22 @@ The codebase is pushed to GitHub at **https://github.com/mahonymade/sbir-grant-a
 | Sidebar year range as single pre-filter | Removed redundant "Phase I award year range" slider from conversion tab. Sidebar `year_range` drives both tabs. |
 | Phase II pool bounded by `year_range[0]` | Efficiency: Phase II awards before earliest Phase I year cannot be matches. Upper bound not applied. |
 | Replaced `iterrows()` in `find_conversions()` | Phase II dict built via `groupby().apply()` (C-level). Phase I loop uses `.values` arrays. Significant speedup on 144K row datasets. |
-| Groq JSON dict unwrapping | Groq JSON mode may return `{"results": [...]}` or bare array — code handles both via `isinstance(scores, dict)` check. |
+| Groq JSON dict unwrapping | Groq JSON mode returns `{"scores": [...]}` (confirmed) — code unwraps via `isinstance(scores, dict)` → `next(iter(scores.values()))`. |
+| Precompute embeddings → ship as artifacts (not runtime encoding) | Old path re-encoded the whole filtered corpus on every search and re-hashed a 200K-string cache key on every filter change. Now corpus is encoded once at build; runtime only encodes the 1-sentence query and slices precomputed embeddings by `_row_id`. Multi-minute → sub-second. |
+| zstd (level 10) for grants.parquet | Long abstract text compresses ~47% better than snappy (159 MB → 81 MB) for negligible read cost. |
+| float16 embeddings | Halves the embeddings artifact (320 MB → ~147 MB). Materialized to float32 per-slice at query time for the dot product. |
+| CPU-only torch wheel in requirements.txt | `--extra-index-url .../whl/cpu` → ~200 MB torch on the Linux Space instead of ~2 GB CUDA. Runtime only embeds one query sentence; no GPU needed. |
+| Deploy target = HF Spaces + HF Hub dataset repo | Free tier 16 GB RAM fits model + mmap'd embeddings + parquet. Artifacts hosted on HF Hub dataset repo, fetched server-side. API path not used (SBIR API unavailable as of 2026-06). |
 
 ---
 
 ## Open Issues
 
-### 1. LLM Mode Free Tier TPM — Partially Resolved
-**Problem**: Groq free tier = 6000 TPM. 50 grants × 600-char abstracts ≈ 6991 tokens → 413 error.
-**Current mitigation**: Hard cap at `LLM_MAX_GRANTS = 30` (≈4500 tokens). Not yet confirmed working end-to-end.
-**Unresolved discussion**: Better options under consideration (user rejected truncating abstracts):
-- **Option A (recommended)**: Add a "grants to LLM score" slider defaulting to 15, giving user explicit control. 15 grants × ~150 tokens + overhead ≈ 2650 tokens — well under limit.
-- **Option B**: Smaller batches (15/call) with ~35s sleep between calls. All grants scored but takes 2–3 min.
-- **Option C**: Upgrade Groq to Dev tier ($9/mo), no code changes needed.
-- **Option D**: Filter by higher embeddings similarity threshold before LLM step.
+### 1. LLM Mode Free Tier TPM — Resolved ✓
+Hard cap at `LLM_MAX_GRANTS = 30` (≈4500 tokens) confirmed working end-to-end. If hitting limits in future: add a user-facing slider (Option A), use smaller batches (Option B), or upgrade to Groq Dev tier (Option C).
 
-### 2. Groq API Key Needs Rotation
+### 2. Groq API Key Needs Rotation ⚠️
 Key was shared in plaintext in a chat transcript. Rotate at https://console.groq.com/keys and update `.streamlit/secrets.toml`.
-
-### 3. GitHub Not Yet Updated
-Many changes across two sessions — no commits made yet. User prefers to commit manually.
 
 ---
 
@@ -143,27 +146,34 @@ def _fmt(n):
 ```
 SBIRAnalysis/
 ├── app.py                          # Main Streamlit UI — three tabs
+├── scripts/
+│   └── build_artifacts.py          # Build (MPS/CUDA) + --upload slim parquet/embeddings/meta to HF Hub
 ├── src/
 │   ├── __init__.py
-│   ├── data_loader.py              # CSV loader + column normalization
-│   ├── similarity.py               # keyword / embeddings / Groq LLM engines
+│   ├── data_loader.py              # parquet+CSV loaders, HF Hub artifact fetch, mmap embeddings loader
+│   ├── similarity.py               # keyword / embeddings (precomputed) / Groq LLM engines
 │   └── conversion.py               # Phase I→II matching (optimized, no iterrows)
-├── requirements.txt                # groq (not anthropic or google-generativeai)
-├── README.md                       # Project overview + setup instructions
+├── requirements.txt                # CPU-torch index; +pyarrow, +huggingface_hub; groq (not anthropic/google)
+├── README.md                       # Project overview + setup + HF Spaces deploy
 ├── CLAUDE.md                       # This file — auto-loaded by Claude Code each session
 ├── .streamlit/
 │   ├── config.toml                 # Blue theme (#2563EB)
-│   ├── secrets.toml                # ADMIN_PASSWORD + GROQ_API_KEY (gitignored) ⚠️ KEY NEEDS ROTATION
+│   ├── secrets.toml                # ADMIN_PASSWORD + GROQ_API_KEY (+ optional SBIR_DATA_REPO), gitignored ⚠️ KEY NEEDS ROTATION
 │   └── secrets.toml.example        # Template
-├── .gitignore
+├── .gitignore                      # also ignores data/grants.parquet + data/embeddings.npy
 ├── data/
-│   └── README.md                   # Instructions for obtaining award_data.csv
-└── award_data.csv                  # 351MB, gitignored
+│   ├── README.md                   # Artifact spec + build instructions
+│   ├── grants.parquet              # ~81MB slim table, gitignored (hosted on HF Hub)
+│   ├── embeddings.npy              # ~147MB float16, gitignored (hosted on HF Hub)
+│   └── meta.json                   # tiny — committed-safe build metadata
+└── award_data.csv                  # 351MB raw, gitignored (build input only)
 ```
 
 ## Environment
 - **Python env**: `.venv/` in project root
 - **Run app**: `.venv/bin/streamlit run app.py`
+- **Build artifacts**: `.venv/bin/python scripts/build_artifacts.py` (add `--upload --repo <user>/<repo>` to push to HF Hub)
 - **GitHub**: https://github.com/mahonymade/sbir-grant-analyzer (mahonymade account)
-- **Packages**: streamlit 1.57, pandas, rapidfuzz, numpy, sentence-transformers 5.4.1, torch, groq
+- **HF Hub dataset repo**: `mahonymade/sbir-grant-analyzer-data` (default; override via `SBIR_DATA_REPO`) — artifacts NOT yet uploaded (build done locally 2026-06-24; upload requires `huggingface-cli login` / `HF_TOKEN`)
+- **Packages**: streamlit 1.57, pandas, rapidfuzz, numpy, pyarrow, huggingface_hub, sentence-transformers 5.4.1, torch (CPU wheel on deploy), groq
 - **secrets.toml**: `ADMIN_PASSWORD = "SBIRAdmin"` and `GROQ_API_KEY` (needs rotation)

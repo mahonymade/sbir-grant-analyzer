@@ -1,6 +1,9 @@
 # Data files (too large for GitHub — see data/README.md)
+# Slim artifacts are hosted on the Hugging Face Hub, not committed here.
 award_data.csv
 *.csv
+data/grants.parquet
+data/embeddings.npy
 
 # Streamlit secrets (contains API keys and passwords)
 .streamlit/secrets.toml

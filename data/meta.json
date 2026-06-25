@@ -1,0 +1,8 @@
+{
+  "model": "all-MiniLM-L6-v2",
+  "n_rows": 201204,
+  "dim": 384,
+  "dtype": "float16",
+  "normalized": true,
+  "built": "2026-06-24"
+}

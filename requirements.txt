@@ -1,9 +1,18 @@
+# On Linux (e.g. Hugging Face Spaces) this pulls the CPU-only PyTorch wheel
+# (~200 MB) instead of the default CUDA build (~2 GB). The app only embeds a
+# one-sentence query at runtime — the corpus is precomputed — so no GPU is needed.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
 streamlit>=1.35
 pandas>=2.0
 rapidfuzz>=3.0
 numpy>=1.26
-# Optional — only needed for embeddings mode:
+pyarrow>=14.0          # read the slim grants.parquet artifact
+huggingface_hub>=0.23  # download hosted artifacts onto the server at startup
+
+# Embeddings mode (query encoding + fallback corpus encoding):
 sentence-transformers>=2.7
 torch
-# Optional — only needed for LLM admin mode:
+
+# LLM admin mode:
 groq

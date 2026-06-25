@@ -64,6 +64,26 @@ def _compute_corpus_embeddings(texts: tuple[str, ...]) -> np.ndarray:
     return model.encode(list(texts), show_progress_bar=False, batch_size=128)
 
 
+def _corpus_embeddings_for(df: pd.DataFrame) -> np.ndarray:
+    """Return embeddings aligned to ``df``'s rows.
+
+    Fast path: slice the precomputed, mmap'd corpus embeddings by ``_row_id``
+    (no encoding at runtime). Fallback: encode ``df`` on the fly — used in local
+    CSV-only dev where no precomputed artifact exists.
+    """
+    from src.data_loader import load_corpus_embeddings
+
+    corpus = load_corpus_embeddings()
+    if corpus is not None and "_row_id" in df.columns:
+        ids = df["_row_id"].to_numpy()
+        # mmap'd float16 → materialize the slice as float32 for the dot product
+        return np.asarray(corpus[ids], dtype=np.float32)
+
+    # Fallback: compute embeddings for this (possibly filtered) corpus.
+    corpus_texts = tuple(df["combined_text_lc"].tolist())
+    return _compute_corpus_embeddings(corpus_texts)
+
+
 def filter_by_embeddings(
     df: pd.DataFrame,
     project_description: str,
@@ -73,17 +93,17 @@ def filter_by_embeddings(
     """Rank grants by cosine similarity to project_description."""
     model = _load_embedding_model()
 
-    # Use combined title+abstract as corpus; cache keyed on the actual strings
-    corpus_texts = tuple(df["combined_text_lc"].tolist())
-    corpus_embeddings = _compute_corpus_embeddings(corpus_texts)
+    corpus_embeddings = _corpus_embeddings_for(df)
 
-    query_embedding = model.encode([project_description])
+    # Normalize the query so cosine == dot product (corpus is pre-normalized;
+    # the fallback path's vectors are normalized here too).
+    query_embedding = model.encode(
+        [project_description], normalize_embeddings=True
+    ).astype(np.float32)
 
-    # Cosine similarity
     norms_corpus = np.linalg.norm(corpus_embeddings, axis=1, keepdims=True)
-    norms_query = np.linalg.norm(query_embedding)
     similarities = (corpus_embeddings @ query_embedding.T).squeeze() / (
-        norms_corpus.squeeze() * norms_query + 1e-9
+        norms_corpus.squeeze() + 1e-9
     )
 
     result = df.copy()

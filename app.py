@@ -45,28 +45,31 @@ st.sidebar.subheader("Data Source")
 
 data_source = st.sidebar.radio(
     "Load data from:",
-    ["CSV file", "API (coming soon)"],
+    ["Hosted dataset", "Local CSV"],
     index=0,
+    help=(
+        "Hosted dataset downloads slim, precomputed artifacts once "
+        "(no large file for you to manage). Local CSV reads a raw award_data.csv."
+    ),
 )
 
-if data_source == "CSV file":
-    default_path = os.path.join(os.path.dirname(__file__), "award_data.csv")
-    csv_path = st.sidebar.text_input("CSV file path", value=default_path)
-    st.sidebar.caption(
-        "Don't have the data file? Download it from "
-        "[SBIR.gov Data Resources](https://www.sbir.gov/data-resources)."
-    )
-    try:
+try:
+    if data_source == "Hosted dataset":
+        df_full = load_data(source="parquet")
+    else:
+        default_path = os.path.join(os.path.dirname(__file__), "award_data.csv")
+        csv_path = st.sidebar.text_input("CSV file path", value=default_path)
+        st.sidebar.caption(
+            "Don't have the data file? Download it from "
+            "[SBIR.gov Data Resources](https://www.sbir.gov/data-resources)."
+        )
         df_full = load_data(source="csv", path=csv_path)
-        st.sidebar.success(f"Loaded {len(df_full):,} grants")
-    except FileNotFoundError:
-        st.sidebar.error(f"File not found: `{csv_path}`\nSee `data/README.md` for setup instructions.")
-        st.stop()
-    except Exception as e:
-        st.sidebar.error(f"Error loading data: {e}")
-        st.stop()
-else:
-    st.sidebar.info("API integration is not yet available. Please use a CSV file.")
+    st.sidebar.success(f"Loaded {len(df_full):,} grants")
+except FileNotFoundError as e:
+    st.sidebar.error(f"Data file not found: {e}\nSee `data/README.md` for setup instructions.")
+    st.stop()
+except Exception as e:
+    st.sidebar.error(f"Error loading data: {e}")
     st.stop()
 
 st.sidebar.markdown("---")
