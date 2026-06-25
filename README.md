@@ -12,7 +12,7 @@ pinned: false
 
 # SBIR Grant Analyzer
 
-A Streamlit web app for exploring and analyzing SBIR/STTR grant data. Built to help researchers identify relevant prior awards and benchmark Phase I → Phase II conversion rates.
+A Streamlit web app for exploring and analyzing SBIR/STTR grant data. Built to help researchers identify relevant prior awards and benchmark Phase I → Phase II conversion rates. https://huggingface.co/spaces/mahonymade/sbir-grant-analyzer
 
 ## Features
 
