@@ -1,4 +1,3 @@
-<!-- The YAML block below is required by Hugging Face Spaces. It is ignored by GitHub. -->
 ---
 title: SBIR Grant Analyzer
 emoji: 🔬
@@ -8,6 +7,8 @@ sdk: streamlit
 app_file: app.py
 pinned: false
 ---
+
+<!-- The YAML block above is required by Hugging Face Spaces; GitHub ignores it. -->
 
 # SBIR Grant Analyzer
 
