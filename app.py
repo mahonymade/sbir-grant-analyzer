@@ -138,6 +138,22 @@ df_filtered = df_filtered[
 
 st.sidebar.markdown(f"**{len(df_filtered):,}** grants after filters")
 
+# Fingerprint of the current sidebar filter state. Stored alongside search
+# results so results created under different filters can be flagged as stale.
+filter_fingerprint = (
+    tuple(selected_agencies),
+    tuple(selected_programs),
+    tuple(selected_phases),
+    year_range,
+)
+
+
+def _search_is_stale() -> bool:
+    return (
+        "search_results" in st.session_state
+        and st.session_state.get("search_filters") != filter_fingerprint
+    )
+
 # ---------------------------------------------------------------------------
 # Guide tab content
 # ---------------------------------------------------------------------------
@@ -535,6 +551,7 @@ with tab_search:
                 )
                 st.session_state["search_results"] = results
                 st.session_state["search_mode"] = "keyword"
+                st.session_state["search_filters"] = filter_fingerprint
 
     # ---- Embeddings mode ----
     elif mode == "Embeddings (semantic)":
@@ -561,6 +578,7 @@ with tab_search:
                     )
                 st.session_state["search_results"] = results
                 st.session_state["search_mode"] = "embeddings"
+                st.session_state["search_filters"] = filter_fingerprint
 
     # ---- LLM mode ----
     elif mode == "LLM Scoring (Admin)":
@@ -635,6 +653,7 @@ with tab_search:
                             )
                         st.session_state["search_results"] = results
                         st.session_state["search_mode"] = "llm"
+                        st.session_state["search_filters"] = filter_fingerprint
 
     # ---- Results display ----
     st.markdown("---")
@@ -642,6 +661,12 @@ with tab_search:
     if "search_results" in st.session_state:
         results: pd.DataFrame = st.session_state["search_results"]
         search_mode_used = st.session_state.get("search_mode", "keyword")
+
+        if _search_is_stale():
+            st.warning(
+                "⚠️ These results were generated with **different sidebar filters** "
+                "than the current ones — re-run the search to refresh."
+            )
 
         st.metric("Matching grants found", f"{len(results):,}")
 
@@ -719,16 +744,30 @@ with tab_conversion:
         help="Higher = stricter title matching. 85 is a good default.",
     )
 
-    # Phase II pool: bounded from sidebar start year — Phase II before that year can't match
+    st.caption(
+        "The Phase I pool applies the sidebar Agency/Program filters. The Phase II "
+        "match pool intentionally spans **all** agencies and programs (a follow-on "
+        "award can be cross-listed). The sidebar Phase filter does not apply to this tab."
+    )
+
+    # Phase I pool: sidebar Agency/Program filters applied (the Phase multiselect
+    # is intentionally ignored — this tab needs Phase I rows regardless).
+    conv_base = df_full
+    if selected_agencies:
+        conv_base = conv_base[conv_base["agency"].isin(selected_agencies)]
+    if selected_programs:
+        conv_base = conv_base[conv_base["program"].isin(selected_programs)]
+
+    phase1_overall = conv_base[
+        (conv_base["phase"].str.strip() == "Phase I") &
+        (conv_base["award_year"].between(year_range[0], year_range[1]))
+    ]
+
+    # Phase II pool: all agencies/programs, bounded from sidebar start year —
+    # Phase II before that year can't match a Phase I in range.
     phase2_pool = df_full[
         (df_full["phase"].str.strip() == "Phase II") &
         (df_full["award_year"] >= year_range[0])
-    ]
-
-    # Overall Phase I pool: full dataset filtered to sidebar year range
-    phase1_overall = df_full[
-        (df_full["phase"].str.strip() == "Phase I") &
-        (df_full["award_year"].between(year_range[0], year_range[1]))
     ]
 
     # Similarity-filtered Phase I pool (if a search has been run)
@@ -745,6 +784,12 @@ with tab_conversion:
             f"(**{len(phase1_similar):,}** are Phase I within the selected year range). "
             "Run the analysis to compare conversion rates."
         )
+        if _search_is_stale():
+            st.warning(
+                "⚠️ The active search results were generated with **different sidebar "
+                "filters** than the current ones — the comparison below may mix filter "
+                "states. Re-run the search to refresh."
+            )
 
     if st.button("Run conversion analysis", type="primary"):
         overall = find_conversions(phase1_overall, phase2_pool, fuzzy_threshold=fuzzy_threshold)

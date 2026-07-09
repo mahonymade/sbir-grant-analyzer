@@ -74,7 +74,18 @@ def _corpus_embeddings_for(df: pd.DataFrame) -> np.ndarray:
     from src.data_loader import load_corpus_embeddings
 
     corpus = load_corpus_embeddings()
-    if corpus is not None and "_row_id" in df.columns:
+    if "_row_id" in df.columns:
+        # Hosted-artifacts path: the grant table came from grants.parquet, so the
+        # matching embeddings artifact MUST be present. Refuse the on-the-fly
+        # fallback here — encoding the corpus on a CPU-only server would appear
+        # to hang for hours and could exhaust memory.
+        if corpus is None:
+            raise RuntimeError(
+                f"Precomputed embeddings could not be loaded (Hugging Face Hub "
+                f"download may have failed). Refusing to encode {len(df):,} "
+                f"abstracts on the fly. Restart the app to retry the download, "
+                f"or rebuild artifacts with `python scripts/build_artifacts.py`."
+            )
         ids = df["_row_id"].to_numpy()
         if len(ids) and ids.max() >= corpus.shape[0]:
             raise RuntimeError(
@@ -85,7 +96,8 @@ def _corpus_embeddings_for(df: pd.DataFrame) -> np.ndarray:
         # mmap'd float16 → materialize the slice as float32 for the dot product
         return np.asarray(corpus[ids], dtype=np.float32)
 
-    # Fallback: compute embeddings for this (possibly filtered) corpus.
+    # Local CSV/dev mode (no _row_id): compute embeddings for this corpus on the
+    # fly — the documented slow path.
     corpus_texts = tuple(df["combined_text_lc"].tolist())
     return _compute_corpus_embeddings(corpus_texts)
 
@@ -232,7 +244,15 @@ def filter_by_llm(
     progress.empty()
 
     result = df.copy()
-    result["llm_score"] = [all_scores.get(i, 0) for i in range(len(df))]
+    # Unscored rows (API failure mid-run or unparseable model output) become NaN
+    # and are excluded below — NOT treated as a legitimate score of 0.
+    result["llm_score"] = [all_scores.get(i) for i in range(len(df))]
+    n_scored = int(result["llm_score"].notna().sum())
+    if n_scored < len(result):
+        st.warning(
+            f"Scored {n_scored} of {len(result)} grants — results are partial. "
+            f"Unscored grants are excluded."
+        )
     result = result[result["llm_score"] >= min_score]
     result = result.sort_values("llm_score", ascending=False)
     return result
