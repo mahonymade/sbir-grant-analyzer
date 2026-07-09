@@ -125,23 +125,33 @@ def load_grants() -> pd.DataFrame:
 def load_corpus_embeddings():
     """Memory-mapped float16 corpus embeddings, indexed by ``_row_id``.
 
-    Returns None if the artifact is unavailable (e.g. local CSV-only dev), in which
-    case the embeddings search falls back to computing them on the fly.
+    Returns None only if the artifact is *unavailable* (e.g. local CSV-only dev),
+    in which case the embeddings search falls back to computing them on the fly.
+    A present-but-inconsistent artifact set raises instead of proceeding — slicing
+    misaligned embeddings would otherwise fail later with an opaque IndexError
+    (or worse, silently return wrong similarities).
     """
     try:
-        emb = np.load(_resolve_artifact("embeddings.npy"), mmap_mode="r")
-        try:
-            meta = json.loads(Path(_resolve_artifact("meta.json")).read_text())
-            if meta.get("n_rows") not in (None, emb.shape[0]):
-                st.warning(
-                    f"Embeddings row count ({emb.shape[0]}) does not match "
-                    f"meta.json ({meta.get('n_rows')}). Artifacts may be out of sync."
-                )
-        except Exception:
-            pass
-        return emb
+        emb_path = _resolve_artifact("embeddings.npy")
     except Exception:
-        return None
+        return None  # artifact unavailable — caller may fall back
+
+    emb = np.load(emb_path, mmap_mode="r")
+
+    n_expected = None
+    try:
+        meta = json.loads(Path(_resolve_artifact("meta.json")).read_text())
+        n_expected = meta.get("n_rows")
+    except Exception:
+        pass  # meta unavailable/unreadable — skip the check, keep the embeddings
+
+    if n_expected is not None and n_expected != emb.shape[0]:
+        raise RuntimeError(
+            f"Artifacts out of sync: embeddings.npy has {emb.shape[0]} rows but "
+            f"meta.json expects {n_expected}. Rebuild both with "
+            f"`python scripts/build_artifacts.py` (and re-upload if deployed)."
+        )
+    return emb
 
 
 def load_from_api(api_params: dict) -> pd.DataFrame:

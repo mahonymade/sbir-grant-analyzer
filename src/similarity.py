@@ -76,6 +76,12 @@ def _corpus_embeddings_for(df: pd.DataFrame) -> np.ndarray:
     corpus = load_corpus_embeddings()
     if corpus is not None and "_row_id" in df.columns:
         ids = df["_row_id"].to_numpy()
+        if len(ids) and ids.max() >= corpus.shape[0]:
+            raise RuntimeError(
+                f"Artifacts out of sync: grants.parquet references _row_id "
+                f"{ids.max()} but embeddings.npy has only {corpus.shape[0]} rows. "
+                f"Rebuild both with `python scripts/build_artifacts.py`."
+            )
         # mmap'd float16 → materialize the slice as float32 for the dot product
         return np.asarray(corpus[ids], dtype=np.float32)
 
@@ -127,7 +133,7 @@ AVG_ABSTRACT_TOKENS = 250
 
 def estimate_llm_cost(n_rows: int) -> float:
     """Rough USD cost estimate for scoring n_rows abstracts."""
-    n_batches = max(1, n_rows // BATCH_SIZE)
+    n_batches = max(1, -(-n_rows // BATCH_SIZE))  # ceiling division
     input_tokens = n_rows * AVG_ABSTRACT_TOKENS + n_batches * 300  # prompt overhead
     output_tokens = n_rows * 10  # ~10 tokens per JSON score entry
     return (input_tokens / 1000 * COST_PER_1K_INPUT_TOKENS +
@@ -202,9 +208,18 @@ def filter_by_llm(
             if isinstance(scores, dict):
                 scores = next(iter(scores.values()))
             for entry in scores:
-                global_idx = batch_idx + entry["index"] - 1
-                all_scores[global_idx] = int(entry["score"])
-        except (json.JSONDecodeError, KeyError, IndexError, StopIteration):
+                # Validate each entry independently so one malformed item
+                # (e.g. "score": "high") doesn't crash the app or sink the batch.
+                try:
+                    local_idx = int(entry["index"])
+                    score = int(entry["score"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if not 1 <= local_idx <= len(batch_rows):
+                    continue  # hallucinated index — ignore
+                all_scores[batch_idx + local_idx - 1] = max(0, min(10, score))
+        except (json.JSONDecodeError, KeyError, IndexError, StopIteration,
+                TypeError, ValueError):
             pass
 
         pct = min(1.0, (batch_idx + BATCH_SIZE) / len(rows))

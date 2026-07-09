@@ -7,16 +7,29 @@ This handles the common case where Phase II titles differ slightly from Phase I.
 
 from __future__ import annotations
 
+import re
+
 import pandas as pd
 from rapidfuzz import fuzz
 
+# Legal suffixes stripped from the END of company names only. An end-anchored
+# regex avoids the substring corruption of naive replace() (e.g. "Acme Corporate
+# Solutions" must NOT become "acmeorate solutions"). Long forms included so
+# "Acme Corp" and "Acme Corporation" normalize identically.
+_COMPANY_SUFFIX_RE = re.compile(
+    r"[,\s]+(incorporated|inc|llc|corporation|corp|limited|ltd)\.?$"
+)
+
 
 def _normalize_company(name: str) -> str:
-    """Lowercase and strip common legal suffixes for better matching."""
+    """Lowercase and strip trailing legal suffixes for better matching."""
     name = str(name).lower().strip()
-    for suffix in (", inc.", ", inc", ", llc.", ", llc", ", corp.", ", corp",
-                   " inc.", " inc", " llc", " corp", ", ltd.", " ltd"):
-        name = name.replace(suffix, "")
+    # Loop to handle stacked suffixes, e.g. "Acme Corp., Ltd."
+    while True:
+        stripped = _COMPANY_SUFFIX_RE.sub("", name)
+        if stripped == name:
+            break
+        name = stripped
     return name.strip(" ,.")
 
 
@@ -115,7 +128,7 @@ def find_conversions(
     )
     year_stats = pd.concat([year_p1, year_converted], axis=1).fillna(0)
     year_stats["rate"] = year_stats["converted"] / year_stats["p1_count"]
-    by_year = year_stats["rate"].sort_values(ascending=True)  # chronological
+    by_year = year_stats["rate"].sort_index()  # chronological (sort by year, not rate)
 
     return {
         "matched_pairs": matched_pairs,
