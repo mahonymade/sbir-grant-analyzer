@@ -646,13 +646,14 @@ with tab_search:
                     "This keeps API usage within free tier limits."
                 )
             else:
-                # Free tier cap: 6000 TPM — limit to 30 grants to stay safe
+                # Free tier cap is 8,000 tokens/min (input + output). A measured
+                # 30-grant batch costs ~4,800 tokens, so this stays well inside it.
                 LLM_MAX_GRANTS = 30
                 llm_input = emb_results.head(LLM_MAX_GRANTS)
                 n_to_score = len(llm_input)
                 if len(emb_results) > LLM_MAX_GRANTS:
                     st.caption(
-                        f"ℹ️ Groq free tier is capped at 6 000 tokens/min. "
+                        f"ℹ️ Groq free tier is capped at 8,000 tokens/min. "
                         f"Scoring top {LLM_MAX_GRANTS} of {len(emb_results)} embeddings results."
                     )
                 est_cost = estimate_llm_cost(n_to_score)

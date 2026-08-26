@@ -172,18 +172,34 @@ def filter_by_embeddings(
 # LLM mode (admin-only)
 # ---------------------------------------------------------------------------
 
-GROQ_MODEL = "llama-3.1-8b-instant"  # replacement for decommissioned llama3-8b-8192
+# Groq retires models on a rolling basis. llama3-8b-8192 went ~May 2025, and its
+# replacement llama-3.1-8b-instant was gone by Aug 2026 (the whole Llama family
+# disappeared from the catalogue). Verify against client.models.list() before
+# assuming this constant is still live.
+GROQ_MODEL = "openai/gpt-oss-20b"
 BATCH_SIZE = 50  # abstracts per API call
-COST_PER_1K_INPUT_TOKENS = 0.00005  # llama-3.1-8b-instant on Groq: $0.05/1M input tokens
-COST_PER_1K_OUTPUT_TOKENS = 0.00008  # llama-3.1-8b-instant on Groq: $0.08/1M output tokens
-AVG_ABSTRACT_TOKENS = 250
+
+# gpt-oss is a *reasoning* model: it spends tokens thinking before emitting the
+# answer, so the old 512 ceiling (sized for a non-reasoning 8B) truncated the
+# JSON mid-object and Groq rejected it with json_validate_failed. Measured: a
+# 30-grant batch uses ~1,130 completion tokens, so 4,096 leaves ample headroom.
+MAX_COMPLETION_TOKENS = 4096
+
+# Measured on a real 30-grant batch (gpt-oss-20b): in=3,675 out=1,130.
+AVG_ABSTRACT_TOKENS = 122
+AVG_OUTPUT_TOKENS_PER_GRANT = 38
+# Re-check against https://groq.com/pricing — these are carried over from the
+# previous model and are not verified for gpt-oss-20b. Free tier bills nothing;
+# the figure is shown only to signal relative cost.
+COST_PER_1K_INPUT_TOKENS = 0.00005
+COST_PER_1K_OUTPUT_TOKENS = 0.00008
 
 
 def estimate_llm_cost(n_rows: int) -> float:
     """Rough USD cost estimate for scoring n_rows abstracts."""
     n_batches = max(1, -(-n_rows // BATCH_SIZE))  # ceiling division
     input_tokens = n_rows * AVG_ABSTRACT_TOKENS + n_batches * 300  # prompt overhead
-    output_tokens = n_rows * 10  # ~10 tokens per JSON score entry
+    output_tokens = n_rows * AVG_OUTPUT_TOKENS_PER_GRANT
     return (input_tokens / 1000 * COST_PER_1K_INPUT_TOKENS +
             output_tokens / 1000 * COST_PER_1K_OUTPUT_TOKENS)
 
@@ -203,9 +219,10 @@ Rate each grant below on a scale of 0–10 for relevance to the project descript
 - 5 = tangentially related (same general field)
 - 10 = highly relevant (directly addresses the same problem/technology)
 
-Return ONLY a JSON array of objects with keys "index" (1-based) and "score" (integer 0-10).
+Return a JSON object with a single key "scores", whose value is an array of objects
+with keys "index" (1-based) and "score" (integer 0-10). Score every grant listed.
 Do not wrap the JSON in markdown or code fences.
-Example: [{{"index": 1, "score": 7}}, {{"index": 2, "score": 2}}]
+Example: {{"scores": [{{"index": 1, "score": 7}}, {{"index": 2, "score": 2}}]}}
 
 GRANTS TO SCORE:
 {items}"""
@@ -240,7 +257,7 @@ def filter_by_llm(
             response = client.chat.completions.create(
                 model=GROQ_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=512,
+                max_tokens=MAX_COMPLETION_TOKENS,
                 response_format={"type": "json_object"},
             )
         except Exception as api_err:

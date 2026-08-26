@@ -68,8 +68,23 @@ The codebase is pushed to GitHub at **https://github.com/mahonymade/sbir-grant-a
 ### 1. LLM Mode Free Tier TPM — Resolved ✓
 Hard cap at `LLM_MAX_GRANTS = 30` (≈4500 tokens) confirmed working end-to-end. If hitting limits in future: add a user-facing slider (Option A), use smaller batches (Option B), or upgrade to Groq Dev tier (Option C).
 
-### 2. Groq API Key Needs Rotation ⚠️
-Key was shared in plaintext in a chat transcript. Rotate at https://console.groq.com/keys and update `.streamlit/secrets.toml`.
+### 2. Groq key rotated + model migrated — RESOLVED ✓ (2026-08-26)
+Key rotated by the user; verified working. The old key had **expired** (`401 expired_api_key`), which is why LLM mode broke. It was never exposed via git — `.streamlit/secrets.toml` has never been tracked in any commit and no `gsk_` literal appears in any blob in full history, so the public GitHub repo never leaked it.
+
+Three things were wrong at once, all fixed:
+1. **Expired key** → rotated (local `secrets.toml` + HF Space secret; the Space injects it as an env var, not into `st.secrets`).
+2. **`llama-3.1-8b-instant` decommissioned** — the entire Llama family is gone from Groq's catalogue as of Aug 2026. Now `openai/gpt-oss-20b`.
+3. **`max_tokens=512` truncated the new model** → `400 json_validate_failed`. gpt-oss is a *reasoning* model that spends tokens thinking before answering; 512 was sized for a non-reasoning 8B. Now `MAX_COMPLETION_TOKENS = 4096`.
+
+A fourth latent bug surfaced during migration: `_build_scoring_prompt` asked for a bare JSON **array**, but Groq's `json_object` mode requires a top-level **object**. The old Llama wrapped it in `{"scores": [...]}` anyway — which is why the parser has the `isinstance(scores, dict)` unwrap — but newer models obey the prompt literally and get rejected. The prompt now requests the object form explicitly.
+
+**Measured** (`openai/gpt-oss-20b`, 30-grant batch): 1.8s, in=3,675 out=1,130, total 4,805 tokens = 60% of the 8,000 TPM free-tier budget. `filter_by_llm` end-to-end: 30 grants → 12 scoring ≥5 in 1.9s. Rate limits: **8,000 TPM**, 1,000 req/day.
+
+To re-check the model list when this breaks again:
+```
+.venv/bin/python -c "import tomllib;from groq import Groq;k=tomllib.load(open('.streamlit/secrets.toml','rb'))['GROQ_API_KEY'];print(sorted(m.id for m in Groq(api_key=k).models.list().data))"
+```
+Candidates tested: `groq/compound-mini` also works (30/30 parsed) but is ~3.5x slower (6.3s) and is an agentic system rather than a plain LLM. `qwen/qwen3.6-27b` failed JSON validation even at higher token ceilings.
 
 ### 3. Artifacts omit two useful columns (optional, needs rebuild + re-upload)
 `SLIM_COLS` keeps 8 of 41 raw columns. Two dropped ones would strengthen the conversion analysis:
