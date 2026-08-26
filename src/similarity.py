@@ -181,9 +181,18 @@ BATCH_SIZE = 50  # abstracts per API call
 
 # gpt-oss is a *reasoning* model: it spends tokens thinking before emitting the
 # answer, so the old 512 ceiling (sized for a non-reasoning 8B) truncated the
-# JSON mid-object and Groq rejected it with json_validate_failed. Measured: a
-# 30-grant batch uses ~1,130 completion tokens, so 4,096 leaves ample headroom.
-MAX_COMPLETION_TOKENS = 4096
+# JSON mid-object and Groq rejected it with json_validate_failed. A 30-grant
+# batch uses ~1,130 completion tokens in practice.
+#
+# But max_tokens cannot simply be set high: Groq charges TPM on the *reservation*
+# (prompt + max_tokens), not on actual usage. A 30-grant prompt is ~3,930 tokens,
+# so max_tokens=4096 reserved 8,023 against an 8,000 limit and 413'd by 23 tokens
+# despite the model only needing 1,130. The ceiling is therefore derived from the
+# leftover budget at call time — see _completion_budget().
+GROQ_TPM_LIMIT = 8000  # free tier, per minute, input + output combined
+TPM_SAFETY_MARGIN = 250  # absorbs error in the prompt-token estimate
+MAX_COMPLETION_TOKENS = 3000
+MIN_COMPLETION_TOKENS = 1200  # below this, a 30-entry JSON risks truncation
 
 # Measured on a real 30-grant batch (gpt-oss-20b): in=3,675 out=1,130.
 AVG_ABSTRACT_TOKENS = 122
@@ -202,6 +211,29 @@ def estimate_llm_cost(n_rows: int) -> float:
     output_tokens = n_rows * AVG_OUTPUT_TOKENS_PER_GRANT
     return (input_tokens / 1000 * COST_PER_1K_INPUT_TOKENS +
             output_tokens / 1000 * COST_PER_1K_OUTPUT_TOKENS)
+
+
+def _estimate_prompt_tokens(prompt: str) -> int:
+    """Rough token count for budgeting.
+
+    chars/4 lands ~23% *above* the true count for these prompts (measured: 4,843
+    estimated vs 3,927 actual). Over-estimating is the safe direction — it makes
+    the reservation smaller than it needs to be rather than tipping over the TPM
+    limit.
+    """
+    return len(prompt) // 4
+
+
+def _completion_budget(prompt: str, n_items: int) -> int:
+    """max_tokens that keeps prompt + max_tokens inside the TPM limit.
+
+    Scaled to the batch: reserving a flat ceiling for a small batch wastes TPM
+    that the pacing loop then has to wait out. ``MIN_COMPLETION_TOKENS`` covers
+    the model's reasoning preamble, on top of the measured per-grant output.
+    """
+    needed = MIN_COMPLETION_TOKENS + n_items * AVG_OUTPUT_TOKENS_PER_GRANT
+    available = GROQ_TPM_LIMIT - TPM_SAFETY_MARGIN - _estimate_prompt_tokens(prompt)
+    return min(MAX_COMPLETION_TOKENS, needed, available)
 
 
 def _build_scoring_prompt(project_description: str, batch: list[dict]) -> str:
@@ -245,6 +277,12 @@ def filter_by_llm(
     progress = st.progress(0, text="Scoring with Groq…")
     n_batches = max(1, (len(rows) + BATCH_SIZE - 1) // BATCH_SIZE)
 
+    # TPM is a rolling per-minute budget spent on prompt + max_tokens. Track what
+    # this run has reserved so a multi-batch job waits for the window to roll
+    # instead of 413-ing partway through.
+    window_start = time.monotonic()
+    reserved_this_window = 0
+
     for batch_idx in range(0, len(rows), BATCH_SIZE):
         batch_rows = rows[batch_idx : batch_idx + BATCH_SIZE]
         batch_data = [
@@ -253,15 +291,46 @@ def filter_by_llm(
         ]
         prompt = _build_scoring_prompt(project_description, batch_data)
 
+        max_completion = _completion_budget(prompt, len(batch_data))
+        if max_completion < MIN_COMPLETION_TOKENS:
+            st.error(
+                f"This batch needs about {_estimate_prompt_tokens(prompt):,} prompt "
+                f"tokens, leaving too little of the {GROQ_TPM_LIMIT:,}/min budget for "
+                f"the reply. Shorten the project description, or score fewer grants."
+            )
+            break
+
+        reservation = _estimate_prompt_tokens(prompt) + max_completion
+        elapsed = time.monotonic() - window_start
+        if elapsed >= 60:
+            window_start, reserved_this_window = time.monotonic(), 0
+        elif reserved_this_window + reservation > GROQ_TPM_LIMIT - TPM_SAFETY_MARGIN:
+            wait = 60 - elapsed
+            progress.progress(
+                min(1.0, batch_idx / max(1, len(rows))),
+                text=f"Token budget reached — waiting {wait:.0f}s for the limit to reset…",
+            )
+            time.sleep(wait)
+            window_start, reserved_this_window = time.monotonic(), 0
+        reserved_this_window += reservation
+
         try:
             response = client.chat.completions.create(
                 model=GROQ_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=MAX_COMPLETION_TOKENS,
+                max_tokens=max_completion,
                 response_format={"type": "json_object"},
             )
         except Exception as api_err:
-            st.error(f"Groq API error: {api_err}")
+            code = getattr(api_err, "status_code", None)
+            if code in (413, 429):
+                st.error(
+                    f"Groq rate limit hit ({code}). The free tier allows "
+                    f"{GROQ_TPM_LIMIT:,} tokens/min. Wait a minute and retry, score "
+                    f"fewer grants, or upgrade at console.groq.com/settings/billing.\n\n{api_err}"
+                )
+            else:
+                st.error(f"Groq API error: {api_err}")
             break
 
         try:

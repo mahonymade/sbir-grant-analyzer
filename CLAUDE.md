@@ -78,7 +78,13 @@ Three things were wrong at once, all fixed:
 
 A fourth latent bug surfaced during migration: `_build_scoring_prompt` asked for a bare JSON **array**, but Groq's `json_object` mode requires a top-level **object**. The old Llama wrapped it in `{"scores": [...]}` anyway — which is why the parser has the `isinstance(scores, dict)` unwrap — but newer models obey the prompt literally and get rejected. The prompt now requests the object form explicitly.
 
-**Measured** (`openai/gpt-oss-20b`, 30-grant batch): 1.8s, in=3,675 out=1,130, total 4,805 tokens = 60% of the 8,000 TPM free-tier budget. `filter_by_llm` end-to-end: 30 grants → 12 scoring ≥5 in 1.9s. Rate limits: **8,000 TPM**, 1,000 req/day.
+**TPM is charged on the RESERVATION, not on usage.** Groq counts `prompt_tokens + max_tokens` against the per-minute limit before running the request. A 30-grant prompt is ~3,930 tokens, so a flat `max_tokens=4096` reserved 8,023 against the 8,000 limit and returned `413 rate_limit_exceeded` — over by 23 tokens, despite the model only ever using ~1,130. Setting a generous ceiling is therefore actively harmful, which is the opposite of the usual intuition.
+
+`_completion_budget(prompt, n_items)` now derives the ceiling at call time from both the batch size and the leftover budget: `min(MAX_COMPLETION_TOKENS, MIN + n*38, TPM_LIMIT - MARGIN - est_prompt)`. Prompt tokens are estimated as `len//4`, which runs ~23% *above* true (4,843 est vs 3,927 actual) — over-estimating is the safe direction for a reservation. `filter_by_llm` also tracks reservations in a rolling 60s window and waits for it to roll rather than 413-ing mid-job, and reports 413/429 with an actionable message.
+
+Verified reservations stay ≤7,750 for 30 grants even with a 30x-longer project description; a description long enough to squeeze the reply below `MIN_COMPLETION_TOKENS` is refused up front with a clear error instead of a cryptic 413.
+
+**Measured** (`openai/gpt-oss-20b`): 30-grant batch 1.8s, in=3,675 out=1,130. `filter_by_llm` end-to-end 2.5–3.7s, 30/30 scored. Multi-batch verified (BATCH_SIZE=10 → 3 batches): no NaN gaps at batch seams, correct cross-batch index arithmetic. Rate limits: **8,000 TPM**, 1,000 req/day.
 
 To re-check the model list when this breaks again:
 ```
