@@ -4,11 +4,13 @@ SBIR Grant Analyzer — Streamlit web app.
 Run locally:
     streamlit run app.py
 
-Two tabs:
+Three tabs:
     1. Project Similarity Search  — find grants similar to your project
     2. Phase Conversion Analysis  — Phase I → II conversion rates
+    3. Phase 1 → 2 Guide          — static reference article
 """
 
+import hmac
 import io
 import os
 
@@ -16,7 +18,7 @@ import pandas as pd
 import streamlit as st
 
 from src.data_loader import load_data, DEFAULT_DISPLAY_COLS
-from src.conversion import find_conversions
+from src.conversion import find_conversions, DEFAULT_MATURITY_YEARS
 from src.similarity import (
     filter_by_keywords,
     filter_by_embeddings,
@@ -34,6 +36,25 @@ def _get_secret(name: str, default: str = "") -> str:
     except Exception:
         pass
     return os.environ.get(name, default)
+
+
+@st.cache_data(show_spinner=False)
+def _to_csv(df: pd.DataFrame) -> str:
+    """Serialize results for download.
+
+    Cached because st.download_button needs its payload up front: without this the
+    CSV is rebuilt on *every* rerun (a 20k-row result costs ~0.3s and a 37 MB
+    string each time a slider moves), not when the button is actually clicked.
+    """
+    buf = io.StringIO()
+    keep = [c for c in df.columns if not c.startswith("_") and not c.endswith("_lc")]
+    df[keep].to_csv(buf, index=False)
+    return buf.getvalue()
+
+
+def _pct(x: float, default: str = "—") -> str:
+    """Format a 0–1 rate, tolerating the NaN returned when no cohort is mature."""
+    return default if x is None or pd.isna(x) else f"{x:.1%}"
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -149,9 +170,12 @@ filter_fingerprint = (
 
 
 def _search_is_stale() -> bool:
+    # Only meaningful once a fingerprint has actually been recorded — a session
+    # restored without one is not evidence that the filters changed.
     return (
         "search_results" in st.session_state
-        and st.session_state.get("search_filters") != filter_fingerprint
+        and "search_filters" in st.session_state
+        and st.session_state["search_filters"] != filter_fingerprint
     )
 
 # ---------------------------------------------------------------------------
@@ -589,7 +613,11 @@ with tab_search:
 
         if stored_password:
             password_input = st.text_input("Admin password", type="password")
-            admin_unlocked = password_input == stored_password
+            # compare_digest avoids leaking the password length/prefix via timing.
+            # Compare as bytes: the str form raises TypeError on non-ASCII input.
+            admin_unlocked = hmac.compare_digest(
+                password_input.encode("utf-8"), str(stored_password).encode("utf-8")
+            )
             if password_input and not admin_unlocked:
                 st.error("Incorrect password.")
         else:
@@ -710,14 +738,9 @@ with tab_search:
                 },
             )
 
-            # Download button — generates CSV only when clicked
-            csv_buffer = io.StringIO()
-            results[[c for c in results.columns if not c.endswith("_lc") and not c.startswith("_")]].to_csv(
-                csv_buffer, index=False
-            )
             st.download_button(
                 label="Download results as CSV",
-                data=csv_buffer.getvalue(),
+                data=_to_csv(results),
                 file_name="sbir_search_results.csv",
                 mime="text/csv",
             )
@@ -735,19 +758,37 @@ with tab_conversion:
     )
 
     # ---- Controls ----
-    fuzzy_threshold = st.slider(
-        "Title match threshold",
-        min_value=60,
-        max_value=100,
-        value=85,
-        step=5,
-        help="Higher = stricter title matching. 85 is a good default.",
-    )
+    ctrl1, ctrl2 = st.columns(2)
+    with ctrl1:
+        fuzzy_threshold = st.slider(
+            "Title match threshold",
+            min_value=60,
+            max_value=100,
+            value=85,
+            step=5,
+            help="Higher = stricter title matching. 85 is a good default.",
+        )
+    with ctrl2:
+        maturity_years = st.slider(
+            "Maturity window (years)",
+            min_value=0,
+            max_value=10,
+            value=DEFAULT_MATURITY_YEARS,
+            step=1,
+            help=(
+                "A Phase I award needs time to convert. Cohorts newer than this many "
+                "years before the last Phase II award in the data are excluded from the "
+                "headline rate — otherwise recent years drag it down artificially. "
+                "Set to 0 to include everything."
+            ),
+        )
 
     st.caption(
         "The Phase I pool applies the sidebar Agency/Program filters. The Phase II "
         "match pool intentionally spans **all** agencies and programs (a follow-on "
-        "award can be cross-listed). The sidebar Phase filter does not apply to this tab."
+        "award can be cross-listed). The sidebar Phase filter does not apply to this tab. "
+        "Each Phase II award is counted for at most one Phase I award, and never for a "
+        "Phase I awarded after it."
     )
 
     # Phase I pool: sidebar Agency/Program filters applied (the Phase multiselect
@@ -792,11 +833,17 @@ with tab_conversion:
             )
 
     if st.button("Run conversion analysis", type="primary"):
-        overall = find_conversions(phase1_overall, phase2_pool, fuzzy_threshold=fuzzy_threshold)
+        overall = find_conversions(
+            phase1_overall, phase2_pool,
+            fuzzy_threshold=fuzzy_threshold, maturity_years=maturity_years,
+        )
         st.session_state["conv_overall"] = overall
 
         if has_search and len(phase1_similar) > 0:
-            filtered = find_conversions(phase1_similar, phase2_pool, fuzzy_threshold=fuzzy_threshold)
+            filtered = find_conversions(
+                phase1_similar, phase2_pool,
+                fuzzy_threshold=fuzzy_threshold, maturity_years=maturity_years,
+            )
             st.session_state["conv_filtered"] = filtered
         else:
             st.session_state.pop("conv_filtered", None)
@@ -821,22 +868,19 @@ with tab_conversion:
             with left:
                 st.markdown("**Overall (all grants)**")
                 m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Phase I", _fmt(r_overall["phase1_count"]))
+                m1.metric("Phase I (mature)", _fmt(r_overall["mature_phase1_count"]))
                 m2.metric("Phase II pool", _fmt(r_overall["phase2_count"]))
-                m3.metric("Converted", _fmt(r_overall["matched_count"]))
-                m4.metric("Rate", f"{r_overall['conversion_rate']:.1%}")
+                m3.metric("Converted", _fmt(r_overall["mature_matched_count"]))
+                m4.metric("Rate", _pct(r_overall["conversion_rate"]))
             with right:
                 st.markdown("**Similar grants only**")
-                delta = r_filtered["conversion_rate"] - r_overall["conversion_rate"]
+                d_over, d_filt = r_overall["conversion_rate"], r_filtered["conversion_rate"]
+                delta = None if pd.isna(d_over) or pd.isna(d_filt) else f"{d_filt - d_over:+.1%} vs overall"
                 m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Phase I", _fmt(r_filtered["phase1_count"]))
+                m1.metric("Phase I (mature)", _fmt(r_filtered["mature_phase1_count"]))
                 m2.metric("Phase II pool", _fmt(r_filtered["phase2_count"]))
-                m3.metric("Converted", _fmt(r_filtered["matched_count"]))
-                m4.metric(
-                    "Rate",
-                    f"{r_filtered['conversion_rate']:.1%}",
-                    delta=f"{delta:+.1%} vs overall",
-                )
+                m3.metric("Converted", _fmt(r_filtered["mature_matched_count"]))
+                m4.metric("Rate", _pct(d_filt), delta=delta)
             # Toggle which result set drives the charts/table below
             view = st.radio(
                 "Show charts and pairs table for:",
@@ -847,11 +891,27 @@ with tab_conversion:
         else:
             st.markdown("### Overall Results")
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Phase I grants", _fmt(r_overall["phase1_count"]))
+            m1.metric("Phase I (mature)", _fmt(r_overall["mature_phase1_count"]))
             m2.metric("Phase II pool", _fmt(r_overall["phase2_count"]))
-            m3.metric("Matched conversions", _fmt(r_overall["matched_count"]))
-            m4.metric("Conversion rate", f"{r_overall['conversion_rate']:.1%}")
+            m3.metric("Matched conversions", _fmt(r_overall["mature_matched_count"]))
+            m4.metric("Conversion rate", _pct(r_overall["conversion_rate"]))
             r = r_overall
+
+        # Explain what the headline number is actually measured over.
+        if pd.isna(r["conversion_rate"]):
+            st.error(
+                f"No Phase I cohort in range is old enough to judge: every award falls "
+                f"within {maturity_years} year(s) of the newest Phase II award. Widen the "
+                f"sidebar year range or lower the maturity window to see a rate."
+            )
+        elif r["censored_count"]:
+            st.info(
+                f"Rate measured over **{r['mature_phase1_count']:,}** Phase I awards from "
+                f"**{int(r['max_mature_year'])} and earlier**. "
+                f"**{r['censored_count']:,}** newer awards are excluded — they have not had "
+                f"{maturity_years} years to convert yet. Including them would report "
+                f"**{r['conversion_rate_raw']:.1%}** instead of **{r['conversion_rate']:.1%}**."
+            )
 
         st.markdown("---")
 
@@ -863,22 +923,45 @@ with tab_conversion:
             agency_data = r["by_agency"].reset_index().rename(
                 columns={"rate": "Conversion Rate"}
             ).head(10)
-            agency_data["Conversion Rate %"] = (agency_data["Conversion Rate"] * 100).round(1)
-            st.bar_chart(agency_data.set_index("agency")[["Conversion Rate %"]], height=350)
+            if agency_data.empty:
+                st.info("No mature Phase I awards in range to break down by agency.")
+            else:
+                agency_data["Conversion Rate %"] = (agency_data["Conversion Rate"] * 100).round(1)
+                st.bar_chart(agency_data.set_index("agency")[["Conversion Rate %"]], height=350)
+            st.caption("Mature cohorts only, consistent with the headline rate.")
 
         with chart_col2:
             st.subheader("Conversion rate by Phase I award year")
             year_data = r["by_year"].reset_index()
-            year_data["Conversion Rate %"] = (year_data["rate"] * 100).round(1)
-            # Cast year to string so Streamlit doesn't add comma thousand-separators
-            year_data["Year"] = year_data["award_year"].astype(int).astype(str)
-            st.line_chart(year_data.set_index("Year")[["Conversion Rate %"]], height=350)
+            if year_data.empty:
+                st.info("No Phase I awards in range.")
+            else:
+                pct_col = (year_data["rate"] * 100).round(1)
+                # Split into two series so the censored tail reads as an artefact of
+                # incomplete follow-up rather than a real decline in conversion.
+                year_data["Mature cohorts"] = pct_col.where(year_data["mature"])
+                year_data["Too recent to judge"] = pct_col.where(~year_data["mature"])
+                # Cast year to string so Streamlit doesn't add comma thousand-separators
+                year_data["Year"] = year_data["award_year"].astype(int).astype(str)
+                st.line_chart(
+                    year_data.set_index("Year")[["Mature cohorts", "Too recent to judge"]],
+                    height=350,
+                )
+            st.caption(
+                "The dip in recent years is right-censoring: those awards have not had "
+                "time to convert yet. They are excluded from the headline rate."
+            )
 
         st.markdown("---")
 
         # ---- Matched pairs table ----
         st.subheader(f"Matched grant pairs ({r['matched_count']:,})")
-        st.markdown("Each row shows a Phase I grant and its matched Phase II counterpart.")
+        st.markdown(
+            "Each row shows a Phase I grant and its matched Phase II counterpart. "
+            "This table lists **every** match found, including those in cohorts too "
+            f"recent to count toward the rate above ({r['mature_matched_count']:,} of "
+            f"these fall in mature cohorts)."
+        )
 
         show_all_conv = st.toggle("Show all columns", value=False, key="conv_toggle")
         pairs = r["matched_pairs"]
@@ -890,11 +973,9 @@ with tab_conversion:
 
         st.dataframe(pairs.reset_index(drop=True), use_container_width=True, height=400)
 
-        csv_buffer_conv = io.StringIO()
-        r["matched_pairs"].to_csv(csv_buffer_conv, index=False)
         st.download_button(
             label="Download matched pairs as CSV",
-            data=csv_buffer_conv.getvalue(),
+            data=_to_csv(r["matched_pairs"]),
             file_name="sbir_conversion_pairs.csv",
             mime="text/csv",
             key="conv_download",

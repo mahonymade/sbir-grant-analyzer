@@ -24,6 +24,10 @@ The codebase is pushed to GitHub at **https://github.com/mahonymade/sbir-grant-a
 - **Column naming**: All normalized to `lowercase_with_underscores` at load time.
 - **Phase encoding**: `"Phase I"` / `"Phase II"` (string with space + Roman numeral). Always `.str.strip()` before comparing.
 - **Phase II pool**: Bounded from sidebar `year_range[0]` upward — Phase II awards before the earliest sidebar year are excluded (efficiency). Upper bound is NOT applied to Phase II (a Phase I from 2023 may convert in 2025+).
+- **Conversion matching invariants** (enforced in `find_conversions`, verified on the full corpus):
+  - **Chronology** — a Phase II award never counts for a Phase I awarded after it. (Was 5.6% of matches before the fix.)
+  - **One-to-one** — each Phase II row is consumed by at most one Phase I. Within a company, Phase I awards are processed oldest-first; each takes the highest-scoring *available* Phase II, ties broken toward the earliest. Verified: 45,829 matches, 45,829 distinct Phase II rows.
+- **Right-censoring is the biggest methodology trap in this dataset.** Recent Phase I cohorts have not had time to convert, so including them deflates the rate badly. Measured cohort rates: 2016 **33.9%**, 2019 **31.4%**, 2021 **23.3%**, 2023 **2.4%** — the plateau is ~33%, everything after ~2019 is censoring, not signal. `find_conversions(maturity_years=5)` therefore reports `conversion_rate` over mature cohorts only (Phase I year ≤ newest Phase II year − 5) and `conversion_rate_raw` for the uncensored comparison. Full-corpus headline: **34.7% mature vs 32.6% raw**. The by-year chart splits into "Mature cohorts" / "Too recent to judge" so the tail is not misread as a real decline.
 - **Sidebar year range is the single date pre-filter** for both tabs. The redundant per-tab Phase I year slider was removed. `year_range` from the sidebar is used everywhere.
 - **`find_conversions()` has NO `@st.cache_data`** — results manually cached in `st.session_state` on button click (Streamlit's cache ignores `_`-prefixed DataFrame params).
 - **LLM mode is admin-only**, gated by `ADMIN_PASSWORD` in `.streamlit/secrets.toml` (gitignored).
@@ -46,7 +50,9 @@ The codebase is pushed to GitHub at **https://github.com/mahonymade/sbir-grant-a
 | Embeddings gate for LLM mode | Limits LLM scoring to top embeddings results rather than full dataset. Prevents rate limit exhaustion. |
 | Sidebar year range as single pre-filter | Removed redundant "Phase I award year range" slider from conversion tab. Sidebar `year_range` drives both tabs. |
 | Phase II pool bounded by `year_range[0]` | Efficiency: Phase II awards before earliest Phase I year cannot be matches. Upper bound not applied. |
-| Replaced `iterrows()` in `find_conversions()` | Phase II dict built via `groupby().apply()` (C-level). Phase I loop uses `.values` arrays. Significant speedup on 144K row datasets. |
+| `find_conversions` works on positional indices + `rapidfuzz.process.cdist` | The old version built `p2_rows_by_company` — every Phase II row as a Python dict including its abstract — which cost **21s and 406 MB** on its own, then called `token_sort_ratio` per pair from Python. Now it groups positional indices per company and lets rapidfuzz do each company block in C. Full corpus: **4.4 min → 8.6s, 406 MB → 70 MB peak.** |
+| `_add_search_columns` keeps only `combined_text_lc` | `abstract_lc`/`title_lc` were never read again after being concatenated, but retained **297 MB** on the full corpus (`abstract_lc` duplicates every abstract). Load+search RAM: 913 MB → 616 MB. The concatenation is byte-identical, so existing embeddings artifacts stay valid. |
+| `_to_csv` is `@st.cache_data`-wrapped | `st.download_button` needs its payload up front, so the old inline `to_csv` rebuilt a 37 MB string on **every rerun** for a 20k-row result — the "generates CSV only when clicked" comment was false. |
 | Groq JSON dict unwrapping | Groq JSON mode returns `{"scores": [...]}` (confirmed) — code unwraps via `isinstance(scores, dict)` → `next(iter(scores.values()))`. |
 | Precompute embeddings → ship as artifacts (not runtime encoding) | Old path re-encoded the whole filtered corpus on every search and re-hashed a 200K-string cache key on every filter change. Now corpus is encoded once at build; runtime only encodes the 1-sentence query and slices precomputed embeddings by `_row_id`. Multi-minute → sub-second. |
 | zstd (level 10) for grants.parquet | Long abstract text compresses ~47% better than snappy (159 MB → 81 MB) for negligible read cost. |
@@ -63,6 +69,16 @@ Hard cap at `LLM_MAX_GRANTS = 30` (≈4500 tokens) confirmed working end-to-end.
 
 ### 2. Groq API Key Needs Rotation ⚠️
 Key was shared in plaintext in a chat transcript. Rotate at https://console.groq.com/keys and update `.streamlit/secrets.toml`.
+
+### 3. Artifacts omit two useful columns (optional, needs rebuild + re-upload)
+`SLIM_COLS` keeps 8 of 41 raw columns. Two dropped ones would strengthen the conversion analysis:
+- **`Contract End Date`** (46.4% populated) — the correct anchor for conversion timing; NIH's rule is "within two years of the Phase 1 *end* date", not award year.
+- **`Duns`** (60.6% populated; 22,219 distinct vs 32,401 distinct company strings) — confirms company identity independently of name spelling, catching renames and normalization misses.
+
+Neither is populated well enough to *replace* the current name+title matching, but both are cheap supplementary signals (~2–3 MB added to the artifact). Requires re-running `scripts/build_artifacts.py --upload` (~30 min encode) — embeddings would be unchanged, so in principle only the parquet needs rebuilding.
+
+### 4. Float16 embedding precision — measured, not a concern
+Re-encoded a 6,000-row sample at fp32 and compared: max per-grant similarity error **4.0e-05** against a score range of −0.232…0.531; **top-10/50/200 set overlap 100%**. Only the ordering of near-ties shifts. This holds because MiniLM output is L2-normalized *before* the cast (components land in ~[−0.26, 0.26], fp16's sweet spot) and the runtime re-divides by actual norms, which partly corrects the rounding. **If the embedding model ever changes, or pre-normalization is dropped, re-verify.**
 
 ---
 

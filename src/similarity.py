@@ -5,7 +5,7 @@ Modes
 -----
 keyword   : Boolean keyword search — fast, no external dependencies.
 embeddings: Cosine similarity via sentence-transformers (local model, ~80 MB).
-llm       : Claude API scoring — admin-only, incurs API cost.
+llm       : Groq API scoring — admin-only, incurs API cost.
 """
 
 from __future__ import annotations

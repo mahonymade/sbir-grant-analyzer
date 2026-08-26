@@ -65,9 +65,17 @@ def _coerce_types(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _add_search_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df["abstract_lc"] = df["abstract"].fillna("").str.lower()
-    df["title_lc"] = df["award_title"].fillna("").str.lower()
-    df["combined_text_lc"] = df["title_lc"] + " " + df["abstract_lc"]
+    """Build the single lowercase text column the search engines read.
+
+    The intermediate title_lc / abstract_lc series are deliberately NOT kept as
+    columns: nothing reads them once combined_text_lc exists, and on the full
+    corpus they retained ~297 MB (abstract_lc alone duplicates every abstract).
+    The concatenation is byte-identical to the previous two-column version, so
+    embeddings built by scripts/build_artifacts.py stay valid.
+    """
+    title_lc = df["award_title"].fillna("").str.lower()
+    abstract_lc = df["abstract"].fillna("").str.lower()
+    df["combined_text_lc"] = title_lc + " " + abstract_lc
     return df
 
 
