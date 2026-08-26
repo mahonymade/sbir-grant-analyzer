@@ -703,18 +703,22 @@ with tab_search:
         else:
             show_all_cols = st.toggle("Show all columns", value=False)
 
-            # Choose columns to display
-            score_col = None
+            # Choose columns to display — score columns lead, so they are visible
+            # (and clickable to sort) without scrolling right.
             if search_mode_used == "embeddings" and "similarity_score" in results.columns:
-                score_col = "similarity_score"
+                score_cols = ["similarity_score"]
             elif search_mode_used == "llm" and "llm_score" in results.columns:
-                score_col = "llm_score"
+                score_cols = ["llm_score"]
+            elif search_mode_used == "keyword":
+                score_cols = [c for c in ("relevance", "keyword_hits") if c in results.columns]
+            else:
+                score_cols = []
 
             if show_all_cols:
                 display_cols = [c for c in results.columns if not c.startswith("_") and not c.endswith("_lc")]
             else:
                 base_cols = [c for c in DEFAULT_DISPLAY_COLS if c in results.columns]
-                display_cols = ([score_col] + base_cols) if score_col else base_cols
+                display_cols = score_cols + base_cols
 
             display_df = results[display_cols].reset_index(drop=True)
 
@@ -724,9 +728,18 @@ with tab_search:
                 display_df["award_amount"] = display_df["award_amount"].apply(
                     lambda x: f"${x:,.0f}" if pd.notna(x) else ""
                 )
-            if score_col in display_df.columns:
-                display_df = display_df.copy()
-                display_df[score_col] = display_df[score_col].round(3)
+            for col in score_cols:
+                # Only similarity_score is fractional; the keyword counts are ints.
+                if col in display_df.columns and pd.api.types.is_float_dtype(display_df[col]):
+                    display_df[col] = display_df[col].round(3)
+
+            if search_mode_used == "keyword" and score_cols:
+                st.caption(
+                    "Sorted **newest award first** by default. Keyword matching has no "
+                    "inherent ranking, so the most relevant grants are not necessarily at "
+                    "the top — click **Keywords matched** (how many of your terms appear) "
+                    "or **Total hits** (how often) to re-sort by relevance."
+                )
 
             st.dataframe(
                 display_df,
@@ -735,6 +748,16 @@ with tab_search:
                 column_config={
                     "abstract": st.column_config.TextColumn("Abstract", width="large"),
                     "award_title": st.column_config.TextColumn("Award Title", width="medium"),
+                    "relevance": st.column_config.NumberColumn(
+                        "Keywords matched",
+                        help="How many of your distinct keywords appear in this grant.",
+                        width="small",
+                    ),
+                    "keyword_hits": st.column_config.NumberColumn(
+                        "Total hits",
+                        help="Total occurrences of all your keywords in title + abstract.",
+                        width="small",
+                    ),
                 },
             )
 

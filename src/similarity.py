@@ -28,7 +28,22 @@ def filter_by_keywords(
     keywords: list[str],
     match_mode: str = "any",  # "any" | "all"
 ) -> pd.DataFrame:
-    """Return rows whose combined title+abstract contain the keywords."""
+    """Return rows whose combined title+abstract contain the keywords.
+
+    Adds two sortable relevance columns, since a boolean mask has no inherent
+    ranking — without them the most relevant grants are scattered arbitrarily
+    through the result set:
+
+    ``relevance``     how many of the distinct keywords the grant matched. The
+                      primary signal in "any" mode; constant in "all" mode,
+                      where every row matches every keyword by definition.
+    ``keyword_hits``  total occurrences of all keywords. The differentiator in
+                      "all" mode, and a tiebreaker in "any" mode.
+
+    Results are sorted **newest award first**. That was previously the incidental
+    order of the source file rather than a guarantee; sorting explicitly means a
+    re-ordered upstream export cannot silently change what users see.
+    """
     if not keywords:
         return df
 
@@ -37,15 +52,36 @@ def filter_by_keywords(
         return df
 
     text = df["combined_text_lc"]
+    patterns = [re.escape(k) for k in clean]
 
     if match_mode == "any":
-        mask = text.str.contains("|".join(re.escape(k) for k in clean), regex=True)
+        mask = text.str.contains("|".join(patterns), regex=True)
     else:
         mask = pd.Series(True, index=df.index)
-        for kw in clean:
-            mask &= text.str.contains(re.escape(kw), regex=True)
+        for pattern in patterns:
+            mask &= text.str.contains(pattern, regex=True)
 
-    return df[mask].copy()
+    result = df[mask].copy()
+
+    if result.empty:
+        result["relevance"] = pd.Series(dtype="int64")
+        result["keyword_hits"] = pd.Series(dtype="int64")
+        return result
+
+    # Score only the matched subset — counting over the full corpus would be
+    # far more expensive for no benefit.
+    matched_text = result["combined_text_lc"]
+    counts = pd.DataFrame(
+        {kw: matched_text.str.count(pattern) for kw, pattern in zip(clean, patterns)},
+        index=result.index,
+    )
+    result["relevance"] = (counts > 0).sum(axis=1).astype("int64")
+    result["keyword_hits"] = counts.sum(axis=1).astype("int64")
+
+    if "award_year" in result.columns:
+        # stable: ties within a year keep source order rather than reshuffling
+        result = result.sort_values("award_year", ascending=False, kind="stable")
+    return result
 
 
 # ---------------------------------------------------------------------------
