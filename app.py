@@ -807,6 +807,18 @@ with tab_conversion:
             ),
         )
 
+    exclude_low_coverage = st.checkbox(
+        "Exclude years affected by the 1999–2000 source-data gap",
+        value=False,
+        help=(
+            "SBIR.gov's export is missing title/abstract text for 28% of 1999 records "
+            "and 84% of 2000 records, so those awards cannot be matched. Because "
+            "conversions land 1–2 years after the Phase I award, this depresses the "
+            "1997–2000 cohorts. Ticking this removes them from the headline rate; "
+            "they stay visible on the chart either way."
+        ),
+    )
+
     st.caption(
         "The Phase I pool applies the sidebar Agency/Program filters. The Phase II "
         "match pool intentionally spans **all** agencies and programs (a follow-on "
@@ -860,6 +872,7 @@ with tab_conversion:
         overall = find_conversions(
             phase1_overall, phase2_pool,
             fuzzy_threshold=fuzzy_threshold, maturity_years=maturity_years,
+            exclude_low_coverage=exclude_low_coverage,
         )
         st.session_state["conv_overall"] = overall
 
@@ -867,6 +880,7 @@ with tab_conversion:
             filtered = find_conversions(
                 phase1_similar, phase2_pool,
                 fuzzy_threshold=fuzzy_threshold, maturity_years=maturity_years,
+                exclude_low_coverage=exclude_low_coverage,
             )
             st.session_state["conv_filtered"] = filtered
         else:
@@ -929,13 +943,28 @@ with tab_conversion:
                 f"sidebar year range or lower the maturity window to see a rate."
             )
         elif r["censored_count"]:
-            st.info(
+            note = (
                 f"Rate measured over **{r['mature_phase1_count']:,}** Phase I awards from "
                 f"**{int(r['max_mature_year'])} and earlier**. "
                 f"**{r['censored_count']:,}** newer awards are excluded — they have not had "
                 f"{maturity_years} years to convert yet. Including them would report "
                 f"**{r['conversion_rate_raw']:.1%}** instead of **{r['conversion_rate']:.1%}**."
             )
+            cohorts = r["low_coverage_cohorts"]
+            if cohorts and r["low_coverage_excluded"]:
+                note += (
+                    f"\n\nAlso excluding **{r['low_coverage_count']:,}** awards from "
+                    f"**{cohorts[0]}–{cohorts[-1]}**, where SBIR.gov's export is missing "
+                    f"the titles needed to match follow-on awards."
+                )
+            elif cohorts:
+                note += (
+                    f"\n\n⚠️ Includes **{r['low_coverage_count']:,}** awards from "
+                    f"**{cohorts[0]}–{cohorts[-1]}**, which are depressed by a gap in "
+                    f"SBIR.gov's export (missing titles on the follow-on awards, so they "
+                    f"cannot be matched). Tick the box above to exclude them."
+                )
+            st.info(note)
 
         st.markdown("---")
 
@@ -961,19 +990,29 @@ with tab_conversion:
                 st.info("No Phase I awards in range.")
             else:
                 pct_col = (year_data["rate"] * 100).round(1)
-                # Split into two series so the censored tail reads as an artefact of
-                # incomplete follow-up rather than a real decline in conversion.
-                year_data["Mature cohorts"] = pct_col.where(year_data["mature"])
-                year_data["Too recent to judge"] = pct_col.where(~year_data["mature"])
+                # Three series, so each dip reads as the artefact it is rather than
+                # as a real decline. Precedence: a broken-source year is labelled as
+                # such even if it is also mature.
+                bad_source = ~year_data["reliable"]
+                year_data["Mature cohorts"] = pct_col.where(
+                    year_data["mature"] & ~bad_source
+                )
+                year_data["Too recent to judge"] = pct_col.where(
+                    ~year_data["mature"] & ~bad_source
+                )
+                year_data["Incomplete source data"] = pct_col.where(bad_source)
                 # Cast year to string so Streamlit doesn't add comma thousand-separators
                 year_data["Year"] = year_data["award_year"].astype(int).astype(str)
+                series = ["Mature cohorts", "Too recent to judge", "Incomplete source data"]
                 st.line_chart(
-                    year_data.set_index("Year")[["Mature cohorts", "Too recent to judge"]],
+                    year_data.set_index("Year")[[s for s in series if year_data[s].notna().any()]],
                     height=350,
                 )
             st.caption(
-                "The dip in recent years is right-censoring: those awards have not had "
-                "time to convert yet. They are excluded from the headline rate."
+                "Two different artefacts, neither a real decline. **Recent years** are "
+                "right-censored — those awards have not had time to convert yet. "
+                "**1997–2000** is a hole in SBIR.gov's export: the follow-on awards exist "
+                "but carry no title, so they cannot be matched."
             )
 
         st.markdown("---")
@@ -982,9 +1021,9 @@ with tab_conversion:
         st.subheader(f"Matched grant pairs ({r['matched_count']:,})")
         st.markdown(
             "Each row shows a Phase I grant and its matched Phase II counterpart. "
-            "This table lists **every** match found, including those in cohorts too "
-            f"recent to count toward the rate above ({r['mature_matched_count']:,} of "
-            f"these fall in mature cohorts)."
+            "This table lists **every** match found, including those in cohorts "
+            f"excluded from the rate above ({r['mature_matched_count']:,} of these "
+            f"fall in cohorts that count toward it)."
         )
 
         show_all_conv = st.toggle("Show all columns", value=False, key="conv_toggle")

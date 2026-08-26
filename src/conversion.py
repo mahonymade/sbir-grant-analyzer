@@ -40,6 +40,36 @@ _COMPANY_SUFFIX_RE = re.compile(
 # data horizon and collapse after that as censoring takes over.
 DEFAULT_MATURITY_YEARS = 5
 
+# Years where the SBIR export itself is incomplete. 28% of 1999 records and 84%
+# of 2000 records carry neither a title nor an abstract, so build_artifacts.py
+# drops them: 6,118 of the 6,527 rows dropped across the entire corpus (94%) come
+# from these two years, against <1% in every neighbouring year. The Phase II pool
+# for 1999 collapses from 1,313 rows in the raw CSV to 74 in the artifact, and
+# DoD — the largest SBIR agency — disappears from that year entirely.
+#
+# This is upstream of us: the gap is in SBIR.gov's data, so re-downloading will
+# not fix it, and contract_end_date / proposal_award_date are near-empty for the
+# era so they cannot substitute. A titleless Phase II row could never be fuzzy
+# matched even if it were kept.
+#
+# scripts/build_artifacts.py recomputes this on every build and warns if the data
+# no longer agrees, so the constant cannot silently go stale.
+LOW_COVERAGE_YEARS = frozenset({1999, 2000})
+
+# Conversions land within roughly two years of the Phase I award (measured: the
+# 1995 cohort's matches fall 14 / 739 / 323 / 65 across 1995-1998). So a cohort is
+# distorted when ANY year in its conversion window is low-coverage — which is why
+# the visible collapse is at 1997-1998, not at 1999-2000 where the data is missing.
+CONVERSION_WINDOW_YEARS = 2
+
+
+def low_coverage_cohorts(
+    low_coverage=LOW_COVERAGE_YEARS, window: int = CONVERSION_WINDOW_YEARS
+) -> frozenset[int]:
+    """Phase I years whose conversion window overlaps a low-coverage year."""
+    return frozenset(y - d for y in low_coverage for d in range(window + 1))
+
+
 _PAIR_COLS = ["company", "award_title", "agency", "award_year", "award_amount", "abstract"]
 
 
@@ -68,6 +98,7 @@ def find_conversions(
     _phase2_df: pd.DataFrame,
     fuzzy_threshold: int = 85,
     maturity_years: int = DEFAULT_MATURITY_YEARS,
+    exclude_low_coverage: bool = False,
 ) -> dict:
     """
     Match Phase I grants to Phase II grants by company + title similarity.
@@ -79,13 +110,20 @@ def find_conversions(
     fuzzy_threshold : minimum rapidfuzz token_sort_ratio score (0–100) to count as a match.
     maturity_years : a Phase I cohort is excluded from the headline rate unless it is at
         least this many years older than the newest Phase II award in the pool.
+    exclude_low_coverage : drop cohorts distorted by the 1999-2000 source-data gap from
+        the headline rate. They are always *flagged* via by_year["reliable"]; this
+        controls whether they also leave the numerator and denominator.
 
     Returns a dict with:
         matched_pairs        : DataFrame of matched Phase I / II rows
         conversion_rate      : float (0–1) over mature cohorts only; NaN if none are mature
         conversion_rate_raw  : float (0–1) over every Phase I row, censoring included
-        by_agency            : Series — conversion rate per agency (mature cohorts only)
-        by_year              : DataFrame indexed by Phase I year, cols rate/p1_count/converted/mature
+        by_agency            : Series — conversion rate per agency (counted cohorts only)
+        by_year              : DataFrame indexed by Phase I year, cols
+                               rate/p1_count/converted/mature/reliable
+        low_coverage_count   : int — mature Phase I rows in source-gap cohorts
+        low_coverage_excluded: bool — whether those left the headline rate
+        low_coverage_cohorts : list[int] — affected years actually present in this pool
         phase1_count         : int — all Phase I rows considered
         phase2_count         : int — size of the Phase II pool
         matched_count        : int — matches found across all cohorts
@@ -170,10 +208,18 @@ def find_conversions(
         else np.zeros(n1, dtype=bool)
     )
 
-    n_mature = int(mature_mask.sum())
-    n_mature_matched = int((mature_mask & matched_mask).sum())
+    # ---- Source-data coverage -------------------------------------------
+    # Always computed so the caller can flag these cohorts; only subtracted from
+    # the headline rate when the caller asks.
+    distorted = low_coverage_cohorts()
+    reliable_mask = ~np.isin(p1_year, list(distorted))
+    counted_mask = mature_mask & reliable_mask if exclude_low_coverage else mature_mask
+
+    n_mature = int(counted_mask.sum())
+    n_mature_matched = int((counted_mask & matched_mask).sum())
     conversion_rate = n_mature_matched / n_mature if n_mature else float("nan")
     conversion_rate_raw = int(matched_mask.sum()) / n1 if n1 else 0.0
+    n_low_coverage = int((mature_mask & ~reliable_mask).sum())
 
     # ---- Matched pairs table ----------------------------------------------
     p1_matched = phase1.iloc[matched_p1_pos]
@@ -191,10 +237,10 @@ def find_conversions(
         {
             "agency": phase1["agency"].to_numpy(),
             "converted": matched_mask,
-            "mature": mature_mask,
+            "counted": counted_mask,
         }
     )
-    mature_agency = agency_stats[agency_stats["mature"]]
+    mature_agency = agency_stats[agency_stats["counted"]]
     grouped = mature_agency.groupby("agency", dropna=True)
     by_agency_df = pd.DataFrame(
         {"p1_count": grouped.size(), "converted": grouped["converted"].sum()}
@@ -205,7 +251,12 @@ def find_conversions(
 
     # ---- Per-year rate (all cohorts, flagged) -----------------------------
     year_stats = pd.DataFrame(
-        {"award_year": p1_year, "converted": matched_mask, "mature": mature_mask}
+        {
+            "award_year": p1_year,
+            "converted": matched_mask,
+            "mature": mature_mask,
+            "reliable": reliable_mask,
+        }
     ).dropna(subset=["award_year"])
     ygrouped = year_stats.groupby("award_year", dropna=True)
     by_year = pd.DataFrame(
@@ -213,6 +264,7 @@ def find_conversions(
             "p1_count": ygrouped.size(),
             "converted": ygrouped["converted"].sum(),
             "mature": ygrouped["mature"].max(),
+            "reliable": ygrouped["reliable"].min(),
         }
     )
     by_year["rate"] = by_year["converted"] / by_year["p1_count"]
@@ -232,5 +284,10 @@ def find_conversions(
         "mature_phase1_count": n_mature,
         "mature_matched_count": n_mature_matched,
         "max_mature_year": max_mature_year,
-        "censored_count": n1 - n_mature,
+        "censored_count": int((~mature_mask).sum()),
+        "low_coverage_count": n_low_coverage,
+        "low_coverage_excluded": bool(exclude_low_coverage),
+        "low_coverage_cohorts": sorted(
+            int(y) for y in distorted if (p1_year == y).any()
+        ),
     }

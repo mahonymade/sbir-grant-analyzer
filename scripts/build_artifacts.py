@@ -35,6 +35,7 @@ from datetime import date
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 # Make `src` importable when run as a script from the project root.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -58,6 +59,20 @@ SLIM_COLS = [
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 DATA_DIR = PROJECT_ROOT / "data"
 
+# A year losing more than this share of its rows to the empty-text filter is a
+# source-data gap, not normal attrition. Healthy years drop <1%; 1999 drops 28%
+# and 2000 drops 84%, so anything in between separates them cleanly.
+LOW_COVERAGE_DROP_THRESHOLD = 0.10
+
+
+def _low_coverage_years(df, has_text) -> list[int]:
+    """Award years where an outsized share of rows lack any searchable text."""
+    if "award_year" not in df.columns:
+        return []
+    drop_rate = (~has_text).groupby(df["award_year"]).mean()
+    bad = drop_rate[drop_rate > LOW_COVERAGE_DROP_THRESHOLD]
+    return sorted(int(y) for y in bad.index if not pd.isna(y))
+
 
 def build(csv_path: str, device: str | None = None) -> dict:
     print(f"Loading raw CSV from {csv_path} …")
@@ -69,8 +84,26 @@ def build(csv_path: str, device: str | None = None) -> dict:
         df["award_title"].fillna("").str.strip().ne("")
         | df["abstract"].fillna("").str.strip().ne("")
     )
+
+    # Those drops are not spread evenly: SBIR.gov's export omits title/abstract for
+    # most of 1999-2000, which silently guts the Phase II match pool for those years
+    # and drags down the 1997-2000 conversion cohorts. Surface it here so the
+    # LOW_COVERAGE_YEARS constant in src/conversion.py cannot go stale unnoticed.
+    low_coverage = _low_coverage_years(df, has_text)
+
     df = df[has_text].reset_index(drop=True)
     print(f"  {len(df):,} rows after dropping empty title+abstract")
+
+    from src.conversion import LOW_COVERAGE_YEARS  # noqa: E402
+
+    if low_coverage:
+        print(f"  low-coverage years (>{LOW_COVERAGE_DROP_THRESHOLD:.0%} dropped): {low_coverage}")
+    if set(low_coverage) != set(LOW_COVERAGE_YEARS):
+        print(
+            f"  !! WARNING: detected {sorted(low_coverage)} but src/conversion.py "
+            f"declares LOW_COVERAGE_YEARS={sorted(LOW_COVERAGE_YEARS)}. Update that "
+            f"constant so the app flags the right cohorts."
+        )
 
     # combined_text_lc is built by load_from_csv; use it verbatim so runtime
     # embeddings (query side) and build-time embeddings (corpus side) match.
